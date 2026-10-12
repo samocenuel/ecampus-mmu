@@ -52,6 +52,7 @@ export function scopeLabel(user) {
     const names = deps.length ? q.all(`SELECT name FROM departments WHERE id IN (${placeholders(deps)})`, ...deps) : [];
     return names.map((n) => n.name).join(', ') || 'No department assigned';
   }
+  if (user.role === 'student') return user.class_name || 'My classes';
   return 'My teaching';
 }
 
