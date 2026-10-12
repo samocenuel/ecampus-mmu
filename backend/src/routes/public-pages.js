@@ -1,4 +1,5 @@
 // Public pages required by app stores: privacy policy and account deletion instructions.
+// The same HTML is also published as static pages (see scripts/build-public-pages.js).
 import { Router } from 'express';
 
 const router = Router();
@@ -25,20 +26,20 @@ const page = (title, body) => `<!doctype html>
 </style></head>
 <body><header><div><strong>${APP}</strong><h1>${title}</h1></div></header><main>${body}</main></body></html>`;
 
-router.get('/privacy', (_req, res) => {
-  res.type('html').send(
-    page(
-      'Privacy policy',
-      `<p class="muted">Last updated ${UPDATED}</p>
+/** Privacy policy HTML. `deletionHref` points at the account deletion page. */
+export const privacyPage = ({ deletionHref = '/account-deletion' } = {}) =>
+  page(
+    'Privacy policy',
+    `<p class="muted">Last updated ${UPDATED}</p>
 <p>${APP} ("the app") helps universities manage teaching and learning: timetables, lecture allocation, attendance and lecture reminders. Each university that uses the app controls its own data. This policy explains what the app collects and why.</p>
 <h2>Information we collect</h2>
 <ul>
   <li><strong>Account details</strong> your university provides or you enter: name, email address, phone number, title, staff or registration number, role, faculty, department and class.</li>
   <li><strong>Academic records</strong> created while using the app: timetables, teaching allocations, attendance registers (who was present at which lecture) and their approval status.</li>
   <li><strong>Preferences</strong>: lecture reminder settings and in-app notifications.</li>
-  <li><strong>University details</strong> entered by administrators, including the university logo.</li>
+  <li><strong>University details</strong> entered by administrators, including an uploaded university logo image.</li>
 </ul>
-<p>The app does not collect your location, contacts, photos, advertising identifiers or payment information, and it contains no advertising.</p>
+<p>The app does not collect your location, contacts, advertising identifiers or payment information, it does not access your photo library except for an image you choose to upload, and it contains no advertising.</p>
 <h2>How information is used</h2>
 <p>Only to provide the service to your university: signing you in, showing your timetable, recording and approving attendance, producing reports for authorised staff (administrators, Deans and Heads of Department within their unit) and sending lecture reminders.</p>
 <h2>Sharing</h2>
@@ -48,29 +49,33 @@ router.get('/privacy', (_req, res) => {
 <h2>Notifications</h2>
 <p>If you allow notifications, the app schedules lecture reminders on your device. You can turn reminders off at any time under Alerts.</p>
 <h2>Deleting your account</h2>
-<p>You can delete your account in the app (More &rarr; Profile &amp; password &rarr; Delete my account) or on the web. See <a href="/account-deletion">how to delete your account</a>. Your personal details are erased; anonymised attendance statistics may be kept by your university.</p>
+<p>You can delete your account in the app (More &rarr; Profile &amp; password &rarr; Delete my account) or on the web. See <a href="${deletionHref}">how to delete your account</a>. Your personal details are erased; anonymised attendance statistics may be kept by your university.</p>
 <h2>Children</h2>
 <p>The app is intended for university staff and students and is not directed at children under 13.</p>
 <h2>Contact</h2>
 <p>Questions about your data: contact ${contactLine}.</p>`,
-    ),
   );
-});
 
-router.get('/account-deletion', (_req, res) => {
-  res.type('html').send(
-    page(
-      'Delete your account',
-      `<p>You can delete your ${APP} account and personal data at any time.</p>
+/** Account deletion HTML. `webHref` points at the web app. */
+export const deletionPage = ({ webHref = '/' } = {}) =>
+  page(
+    'Delete your account',
+    `<p>You can delete your ${APP} account and personal data at any time.</p>
 <h2>In the mobile app</h2>
 <ol><li>Sign in and open <strong>More</strong>.</li><li>Tap <strong>Profile &amp; password</strong>.</li><li>Tap <strong>Delete my account</strong> and confirm with your password.</li></ol>
 <h2>On the web</h2>
-<ol><li>Sign in at <a href="/">${APP} on the web</a>.</li><li>Open your name (top right) &rarr; <strong>Profile &amp; password</strong>.</li><li>Choose <strong>Delete my account</strong> and confirm with your password.</li></ol>
+<ol><li>Sign in at <a href="${webHref}">${APP} on the web</a>.</li><li>Open your name (top right) &rarr; <strong>Profile &amp; password</strong>.</li><li>Choose <strong>Delete my account</strong> and confirm with your password.</li></ol>
 <h2>What is deleted</h2>
 <p>Your name, email address, phone number, staff/registration number, notifications and reminder settings are erased immediately and you can no longer sign in. Attendance and teaching records are kept only in anonymised form ("Deleted user") so your university's statistics stay correct.</p>
 <p>If you cannot sign in, ask ${contactLine} to delete your account for you.</p>`,
-    ),
   );
+
+router.get('/privacy', (_req, res) => {
+  res.type('html').send(privacyPage());
+});
+
+router.get('/account-deletion', (_req, res) => {
+  res.type('html').send(deletionPage());
 });
 
 export default router;
