@@ -1,0 +1,15 @@
+name: Keep demo server awake
+
+# Render's free plan sleeps after 15 idle minutes, which makes the first request
+# (e.g. a Play Store reviewer signing in) time out. Ping it every 10 minutes.
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    if: github.repository == 'samocenuel/ecampus-mmu'
+    runs-on: ubuntu-latest
+    steps:
+      - run: curl --fail --silent --show-error --max-time 120 --retry 3 --retry-delay 20 https://ecampus-mmu.onrender.com/api/health
