@@ -1,16 +1,19 @@
 # Render Blueprint: API + web app from the Dockerfile at https://ecampus-mmu.onrender.com
-# Starter plan + persistent disk so the SQLite database and uploaded logos survive deploys.
+#
+# Free plan: no persistent disk and the service sleeps when idle, so the SQLite
+# database resets on every restart (demo data is reloaded automatically).
+# For real use switch to `plan: starter` and add a disk, e.g.:
+#   disk:
+#     name: ecampus-data
+#     mountPath: /data
+#     sizeGB: 1
 services:
   - type: web
     name: ecampus-mmu
     runtime: docker
-    plan: starter
+    plan: free
     region: frankfurt
     healthCheckPath: /api/health
-    disk:
-      name: ecampus-data
-      mountPath: /data
-      sizeGB: 1
     envVars:
       - key: JWT_SECRET
         generateValue: true
