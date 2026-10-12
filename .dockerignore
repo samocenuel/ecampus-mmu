@@ -1,0 +1,8 @@
+**/node_modules
+backend/data
+backend/uploads
+web/dist
+mobile
+.git
+.github
+.claude

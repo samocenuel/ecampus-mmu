@@ -1,0 +1,24 @@
+# Render Blueprint: API + web app from the Dockerfile at https://ecampus-mmu.onrender.com
+# Starter plan + persistent disk so the SQLite database and uploaded logos survive deploys.
+services:
+  - type: web
+    name: ecampus-mmu
+    runtime: docker
+    plan: starter
+    region: frankfurt
+    healthCheckPath: /api/health
+    disk:
+      name: ecampus-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: JWT_SECRET
+        generateValue: true
+      # Loads the demo university into an empty database (used by app-store reviewers).
+      - key: SEED_DEMO
+        value: "true"
+      - key: APP_NAME
+        value: eCampus MMU
+      # Public contact shown on /privacy and /account-deletion (same as the Play listing).
+      - key: SUPPORT_EMAIL
+        value: samuel.ocen@mmu.ac.ug
