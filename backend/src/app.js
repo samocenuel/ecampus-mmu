@@ -48,10 +48,21 @@ function errorHandler(err, _req, res, _next) {
   res.status(500).json({ error: 'Something went wrong on the server' });
 }
 
-export function createApp() {
+export function createApp({ basePath = config.basePath } = {}) {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 1);
+  // Under a sub-path (e.g. /ecampus) the routes below see paths without the prefix,
+  // whether or not the host forwards it.
+  if (basePath) {
+    app.use((req, _res, next) => {
+      if (req.url === basePath || req.url.startsWith(`${basePath}/`) || req.url.startsWith(`${basePath}?`)) {
+        req.url = req.url.slice(basePath.length);
+        if (!req.url.startsWith('/')) req.url = `/${req.url}`;
+      }
+      next();
+    });
+  }
   app.use(
     cors({
       origin: config.corsOrigin === '*' ? true : config.corsOrigin.split(',').map((s) => s.trim()),

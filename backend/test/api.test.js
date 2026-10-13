@@ -331,3 +331,33 @@ describe('Reports and notifications', () => {
     assert.equal(reminders.length, 1);
   });
 });
+
+describe('Hosting under a sub-path', () => {
+  test('serves the API and public pages under BASE_PATH, with or without the prefix', async () => {
+    const sub = createApp({ basePath: '/ecampus' }).listen(0);
+    await new Promise((r) => sub.once('listening', r));
+    const root = `http://127.0.0.1:${sub.address().port}`;
+    try {
+      const health = await fetch(`${root}/ecampus/api/health`);
+      assert.equal(health.status, 200);
+      assert.equal((await health.json()).ok, true);
+      const privacy = await fetch(`${root}/ecampus/privacy`);
+      assert.equal(privacy.status, 200);
+      assert.match(await privacy.text(), /Privacy policy/);
+      const login = await fetch(`${root}/ecampus/api/auth/login?x=1`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'admin@demo.edu', password: DEMO_PASSWORD }),
+      });
+      assert.equal(login.status, 200);
+      // A host that strips the prefix itself still works.
+      assert.equal((await fetch(`${root}/api/health`)).status, 200);
+      // Paths that only start with the same letters are not rewritten to the API.
+      const lookalike = await fetch(`${root}/ecampusx/api/health`);
+      assert.doesNotMatch(lookalike.headers.get('content-type') || '', /json/);
+    } finally {
+      sub.closeAllConnections();
+      sub.close();
+    }
+  });
+});

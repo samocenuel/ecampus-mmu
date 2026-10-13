@@ -13,6 +13,8 @@ export const config = {
   // Flutter web build of the mobile app (flutter build web --base-href /m/), served at /m/.
   mobileWebDist: process.env.MOBILE_WEB_DIST || path.join(root, '..', 'mobile', 'build', 'web'),
   corsOrigin: process.env.CORS_ORIGIN || '*',
+  // URL prefix when hosted under a sub-path, e.g. BASE_PATH=/ecampus for https://example.com/ecampus.
+  basePath: (process.env.BASE_PATH || '').replace(/\/+$/, ''),
   reminderIntervalMs: Number(process.env.REMINDER_INTERVAL_MS || 60_000),
   isProduction: process.env.NODE_ENV === 'production',
 };

@@ -30,14 +30,15 @@ function wipe() {
 const FIRST = ['Aisha', 'Brian', 'Catherine', 'Daniel', 'Esther', 'Francis', 'Gloria', 'Henry', 'Irene', 'Joseph', 'Kevin', 'Lydia', 'Moses', 'Naomi', 'Oscar', 'Patience', 'Ronald', 'Sharon', 'Timothy', 'Vivian', 'Winnie', 'Allan', 'Brenda', 'Collins'];
 const LAST = ['Akello', 'Byamukama', 'Chebet', 'Draku', 'Ekwaru', 'Friday', 'Kabugo', 'Lubega', 'Mirembe', 'Nakimuli', 'Ochieng', 'Pande', 'Rukundo', 'Ssali', 'Tumwine', 'Wanyama', 'Zziwa', 'Asiimwe', 'Barungi', 'Kyomuhendo'];
 
-export function seedDemo({ quiet = false } = {}) {
+// ownerPassword: the platform owner (super admin) password; defaults to the demo password.
+export function seedDemo({ quiet = false, ownerPassword = DEMO_PASSWORD } = {}) {
   const log = (...a) => !quiet && console.log(...a);
   const hash = hashPassword(DEMO_PASSWORD);
 
   return tx(() => {
     wipe();
 
-    insert('users', { university_id: null, name: 'Platform Owner', email: 'owner@lms-platform.example', password_hash: hash, role: 'super_admin' });
+    insert('users', { university_id: null, name: 'Platform Owner', email: 'owner@lms-platform.example', password_hash: ownerPassword === DEMO_PASSWORD ? hash : hashPassword(ownerPassword), role: 'super_admin' });
 
     const uni = insert('universities', {
       name: 'Demo University',

@@ -59,7 +59,7 @@ For a single-server setup, run `npm run build` in `web/`. The API then serves th
 | Lecturer | `brian.kato@demo.edu` |
 | Class representative (BSCS Year 1) | `rep.bscs1@students.demo.edu` |
 | Student (BSCS Year 1) | `student.bscs1@students.demo.edu` |
-| Platform owner (SaaS operator) | `owner@lms-platform.example` |
+| Platform owner (SaaS operator) | `owner@lms-platform.example` (local `npm run seed` only; hosted servers use `SUPER_ADMIN_PASSWORD`) |
 
 The seed is relative to today's date, so there is always a running semester with three weeks of attendance history and some registers waiting for approval.
 
@@ -81,9 +81,10 @@ Mobile covers every role: dashboards, timetables (with generate and add-session 
 
 * **Docker:** `docker build -t mmu-lms . && docker run -p 4000:4000 -v lms-data:/data -e JWT_SECRET=change-me mmu-lms`
 * **Render:** the included [`render.yaml`](render.yaml) deploys the Docker image (set `SEED_DEMO=true` to start with demo data).
+* **cPanel (e.g. Namecheap) under a sub-path:** build the web app with `VITE_API_URL=/ecampus npx vite build --base=/ecampus/`, then in *Setup Node.js App* use Node 22.13+ (or 24), application root `…/backend`, application URL `/ecampus`, startup file `start.cjs`, and set `BASE_PATH=/ecampus` and `JWT_SECRET`. Run *NPM Install* and restart.
 * **CI:** [GitHub Actions](.github/workflows/ci.yml) runs the API tests, builds the web app, analyses/tests the Flutter app and uploads a release **APK** as a build artifact.
 
-Environment variables (API): `PORT` (4000), `JWT_SECRET` (**set in production**), `DB_FILE`, `UPLOAD_DIR`, `CORS_ORIGIN` (default `*`), `SEED_DEMO`.
+Environment variables (API): `PORT` (4000), `JWT_SECRET` (**set in production**), `DB_FILE`, `UPLOAD_DIR`, `CORS_ORIGIN` (default `*`), `SEED_DEMO`, `BASE_PATH` (sub-path such as `/ecampus`), `SUPER_ADMIN_EMAIL` + `SUPER_ADMIN_PASSWORD` (creates the platform owner account if there is none; with `SEED_DEMO` the demo owner gets this password, or a random one).
 
 ## Architecture notes
 

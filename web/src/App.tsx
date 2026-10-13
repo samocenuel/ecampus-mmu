@@ -53,7 +53,7 @@ const MEMBERS: Role[] = ['admin', 'dean', 'hod', 'lecturer', 'student'];
 
 export default function App() {
   return (
-    <BrowserRouter>
+    <BrowserRouter basename={import.meta.env.BASE_URL.replace(/\/$/, '')}>
       <FeedbackProvider>
         <AuthProvider>
           <Routes>
