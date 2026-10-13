@@ -14,11 +14,12 @@ if (process.env.SEED_DEMO === 'true' && !q.get('SELECT 1 FROM universities LIMIT
   console.log('Seeded demo data');
 }
 
-// SUPER_ADMIN_EMAIL + SUPER_ADMIN_PASSWORD create the platform owner account when there is none.
-const { SUPER_ADMIN_EMAIL, SUPER_ADMIN_PASSWORD } = process.env;
-if (SUPER_ADMIN_EMAIL && SUPER_ADMIN_PASSWORD && !q.get("SELECT 1 FROM users WHERE role = 'super_admin'")) {
-  insert('users', { university_id: null, name: 'Platform Owner', email: SUPER_ADMIN_EMAIL.trim(), password_hash: hashPassword(SUPER_ADMIN_PASSWORD), role: 'super_admin' });
-  console.log(`Created platform owner ${SUPER_ADMIN_EMAIL.trim()}`);
+// SUPER_ADMIN_EMAIL + SUPER_ADMIN_PASSWORD create that platform owner account if it doesn't exist yet
+// (an existing account keeps its password, so it can be changed in the app afterwards).
+const ownerEmail = process.env.SUPER_ADMIN_EMAIL?.trim();
+if (ownerEmail && process.env.SUPER_ADMIN_PASSWORD && !q.get('SELECT 1 FROM users WHERE email = ?', ownerEmail)) {
+  insert('users', { university_id: null, name: 'Platform Owner', email: ownerEmail, password_hash: hashPassword(process.env.SUPER_ADMIN_PASSWORD), role: 'super_admin' });
+  console.log(`Created platform owner ${ownerEmail}`);
 }
 
 const app = createApp();

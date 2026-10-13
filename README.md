@@ -84,7 +84,7 @@ Mobile covers every role: dashboards, timetables (with generate and add-session 
 * **cPanel (e.g. Namecheap) under a sub-path:** build the web app with `VITE_API_URL=/ecampus npx vite build --base=/ecampus/`, then in *Setup Node.js App* use Node 22.13+ (or 24), application root `…/backend`, application URL `/ecampus`, startup file `start.cjs`, and set `BASE_PATH=/ecampus` and `JWT_SECRET`. Run *NPM Install* and restart.
 * **CI:** [GitHub Actions](.github/workflows/ci.yml) runs the API tests, builds the web app, analyses/tests the Flutter app and uploads a release **APK** as a build artifact.
 
-Environment variables (API): `PORT` (4000), `JWT_SECRET` (**set in production**), `DB_FILE`, `UPLOAD_DIR`, `CORS_ORIGIN` (default `*`), `SEED_DEMO`, `BASE_PATH` (sub-path such as `/ecampus`), `SUPER_ADMIN_EMAIL` + `SUPER_ADMIN_PASSWORD` (creates the platform owner account if there is none; with `SEED_DEMO` the demo owner gets this password, or a random one).
+Environment variables (API): `PORT` (4000), `JWT_SECRET` (**set in production**), `DB_FILE`, `UPLOAD_DIR`, `CORS_ORIGIN` (default `*`), `SEED_DEMO`, `BASE_PATH` (sub-path such as `/ecampus`), `SUPER_ADMIN_EMAIL` + `SUPER_ADMIN_PASSWORD` (creates that platform owner account if it doesn't exist yet; with `SEED_DEMO` the demo owner gets this password, or a random one).
 
 ## Architecture notes
 
