@@ -12,7 +12,6 @@ const DEMO = [
   ['Lecturer', 'brian.kato@demo.edu'],
   ['Class representative', 'rep.bscs1@students.demo.edu'],
   ['Student', 'student.bscs1@students.demo.edu'],
-  ['Platform owner (SaaS)', 'owner@lms-platform.example'],
 ];
 const DEMO_PASSWORD = 'Passw0rd!';
 
