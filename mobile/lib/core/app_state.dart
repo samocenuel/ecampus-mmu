@@ -8,6 +8,9 @@ import 'package:url_launcher/url_launcher.dart';
 import 'api.dart';
 import 'notifications.dart';
 
+/// Servers earlier versions used by default; saved copies of them are replaced on start.
+const _retiredServers = {'https://ecampus-mmu.onrender.com'};
+
 /// Default API address. Override at build time with
 /// `--dart-define=API_URL=https://your-server`, or from the sign-in screen.
 String defaultServerUrl() {
@@ -57,6 +60,11 @@ class AppState extends ChangeNotifier {
 
   Future<void> init() async {
     _prefs = await SharedPreferences.getInstance();
+    // 1.0.0 pointed at the free demo server; forget it so the new default applies.
+    if (_retiredServers.contains(_prefs!.getString('server_url'))) {
+      await _prefs!.remove('server_url');
+      await _prefs!.remove('token');
+    }
     api = Api(_prefs!.getString('server_url') ?? defaultServerUrl());
     api.token = _prefs!.getString('token');
     await NotificationService.instance.init();
