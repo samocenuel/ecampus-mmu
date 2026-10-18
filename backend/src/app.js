@@ -19,6 +19,7 @@ import attendanceRoutes from './routes/attendance.js';
 import notificationRoutes from './routes/notifications.js';
 import reportRoutes from './routes/reports.js';
 import dashboardRoutes from './routes/dashboard.js';
+import claimRoutes from './routes/claims.js';
 
 const UNIQUE_MESSAGES = {
   'users.email': 'A user with that email address already exists',
@@ -98,6 +99,7 @@ export function createApp({ basePath = config.basePath } = {}) {
   tenant.use('/notifications', notificationRoutes);
   tenant.use('/reports', reportRoutes);
   tenant.use('/dashboard', dashboardRoutes);
+  tenant.use('/claims', claimRoutes);
   app.use('/api', tenant);
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found' }));
 

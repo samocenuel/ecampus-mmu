@@ -26,6 +26,7 @@ It has three parts that share one REST API:
 | **Programmes and course units** with codes and details; **cross-cutting units** shared across programmes | *Setup → Programmes / Course units*. Programme-specific units belong to one programme; cross-cutting units can be linked to many (per year and semester) and are taught to combined classes. |
 | **Cross-cutting units allocated first**, with a **warning** otherwise | *Load allocation* is split into Step 1 (cross-cutting) and Step 2 (programme units). Creating a programme unit before any cross-cutting unit exists, or allocating one while cross-cutting allocations are pending, triggers a confirmation warning (API returns `409 requires_confirmation`). |
 | **Timetable generated** and exported to **Excel or PDF** | *Timetable → Generate* places all allocations (cross-cutting first, smallest fitting room, spread across the week). Export any view (master, class, lecturer, room, department) as `.xlsx` or `.pdf`. |
+| **Part-time pay claims** | *Pay claims*: the Dean sets the faculty's rates (teaching per contact hour; tasks such as marking per script or internship supervision per student). Part-time lecturers (Users → Employment: Part-time) raise a monthly claim: lectures whose attendance they approved are added automatically with the date, time, classes and students present, and they add tasks. The claim goes HoD → Dean → **HR (Directorate)**, who verifies it and records the payment reference. Any stage can return it with a reason; every step is logged and the lecturer is notified. A lecture can only be claimed once. HR exports the payment schedule to Excel. |
 | Students and lecturers **set lecture reminders** | *Notifications*: on/off plus lead time (5 min to 2 h). The server sends in-app/browser reminders; the mobile app schedules real phone notifications that fire even when the app is closed. |
 
 ## Quick start (local)
@@ -49,7 +50,7 @@ For a single-server setup, run `npm run build` in `web/`. The API then serves th
 
 ### Demo accounts
 
-`npm run seed` creates **Demo University** (all passwords `Passw0rd!`):
+`npm run seed` (or `SEED_DEMO=true`) creates **Demo University**. Visitors open it from **Try the demo (no account needed)** under the sign-in form, pick a role and are signed in without a password (`GET/POST /api/auth/demo`). The shared demo accounts can't have their password, email, role or status changed, or be deleted. For local testing the accounts below also sign in with `Passw0rd!`:
 
 | Role | Email |
 | --- | --- |
@@ -59,6 +60,8 @@ For a single-server setup, run `npm run build` in `web/`. The API then serves th
 | Lecturer | `brian.kato@demo.edu` |
 | Class representative (BSCS Year 1) | `rep.bscs1@students.demo.edu` |
 | Student (BSCS Year 1) | `student.bscs1@students.demo.edu` |
+| Part-time lecturer (Computer Science) | `esther.atim@demo.edu` |
+| HR (Directorate) | `hr@demo.edu` |
 | Platform owner (SaaS operator) | `owner@lms-platform.example` (local `npm run seed` only; hosted servers use `SUPER_ADMIN_PASSWORD`) |
 
 The seed is relative to today's date, so there is always a running semester with three weeks of attendance history and some registers waiting for approval.
@@ -89,7 +92,7 @@ Environment variables (API): `PORT` (4000), `JWT_SECRET` (**set in production**)
 ## Architecture notes
 
 * **Multi-tenancy:** every record carries a `university_id`, and every API query is scoped to the signed-in user's university. The platform owner can suspend a tenant.
-* **Scope rules:** see `backend/src/scope.js`. Admin covers all departments, Dean covers the departments in their faculty, HoD covers their own department.
+* **Scope rules:** see `backend/src/scope.js`. Admin covers the whole university; a Dean covers one faculty and its departments; a HoD covers one department, its programmes and classes, the units it owns (including ones shared out to other departments) and cross-cutting units shared in to its programmes. Units owned elsewhere are read-only. People lists show only the people attached to the viewer: a HoD their department, a Dean their faculty, a lecturer the students they teach.
 * **Cross-cutting policy:** see `backend/src/services/allocation-rules.js`. It works out which (course unit, class) pairs the curriculum requires each semester and which are still unallocated.
 * **Collision checks and generator:** see `backend/src/services/timetable.js`.
 * **Exports:** see `backend/src/services/exporter.js` (ExcelJS and PDFKit, branded with the university's colour and logo).

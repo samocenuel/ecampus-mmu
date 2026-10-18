@@ -4,7 +4,7 @@ import { api, ApiError, qs } from '../api';
 import { useAuth } from '../auth';
 import { useFeedback } from '../components/feedback';
 import { Agenda, WeekGrid } from '../components/WeekGrid';
-import { Alert, Badge, Button, Card, Checkbox, EmptyState, ErrorNote, Field, Input, Modal, PageHeader, Select, Spinner, Tabs } from '../components/ui';
+import { Alert, Badge, Button, Card, Checkbox, EmptyState, ErrorNote, Field, Input, Modal, PageHeader, plural, Select, Spinner, Tabs } from '../components/ui';
 import { useDebounced, useFetch, usePersistentState } from '../hooks';
 import { DAY_NAMES, MANAGER_ROLES, Session } from '../types';
 import { ExportButtons } from './MyTimetable';
@@ -20,7 +20,7 @@ const addHours = (t: string, h: number) => {
 export function useTerms() {
   const { data: terms } = useFetch<any[]>('/api/terms');
   const current = terms?.find((t) => t.is_current) || terms?.[0];
-  return { terms: terms || [], current };
+  return { terms: terms || [], current, loaded: terms !== null };
 }
 
 function SessionEditor({
@@ -210,7 +210,7 @@ function GenerateDialog({ open, onClose, termId, onDone }: { open: boolean; onCl
     try {
       const r = await api('/api/timetable/generate', { method: 'POST', body: { term_id: termId, clear_existing: clear } });
       setResult(r);
-      toast(`Timetable generated: ${r.placed} session(s) placed`);
+      toast(`Timetable generated: ${plural(r.placed, 'session')} placed`);
       onDone();
     } catch (err) {
       fail(err);
@@ -266,7 +266,7 @@ function GenerateDialog({ open, onClose, termId, onDone }: { open: boolean; onCl
             </div>
           </div>
           {result.unplaced.length > 0 ? (
-            <Alert tone="warning" title={`${result.unplaced.length} allocation(s) could not be fully placed`}>
+            <Alert tone="warning" title={`${plural(result.unplaced.length, 'allocation')} could not be fully placed`}>
               <ul className="detail-list">
                 {result.unplaced.map((u: any) => (
                   <li key={u.allocation_id}>
@@ -287,7 +287,7 @@ function GenerateDialog({ open, onClose, termId, onDone }: { open: boolean; onCl
 export default function Timetable() {
   const { user } = useAuth();
   const isManager = MANAGER_ROLES.includes(user!.role);
-  const { terms, current } = useTerms();
+  const { terms, current, loaded: termsLoaded } = useTerms();
   const [termId, setTermId] = useState<number | null>(null);
   const [viewType, setViewType] = usePersistentState<ViewType>('lms_tt_type', 'all');
   const [entity, setEntity] = useState<string>('');
@@ -373,7 +373,7 @@ export default function Timetable() {
         </div>
       </div>
       <ErrorNote error={error} />
-      {!terms.length && <Alert tone="warning" title="Create an academic term first" />}
+      {termsLoaded && !terms.length && <Alert tone="warning" title="Create an academic term first" />}
       {loading && !data && <Spinner />}
       {data && (
         <Card padded={false} title={<span className="row gap-sm">{data.title} <Badge>{data.sessions.length} sessions</Badge></span>} actions={<span className="muted small hide-sm"><span className="cc-tag">CC</span> cross-cutting</span>}>

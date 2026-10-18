@@ -339,3 +339,54 @@ export async function reportXlsx(university, report) {
   sheet('Room utilisation', [['Room', 'name', 20], ['Building', 'building', 18], ['Capacity', 'capacity', 10], ['Booked hrs/wk', 'booked_hours', 14], ['Utilisation %', 'utilisation', 14]], report.rooms);
   return Buffer.from(await wb.xlsx.writeBuffer());
 }
+
+/** Payment schedule for part-time claims: one row per claim, plus every claimed lecture and task. */
+export async function claimsXlsx(university, title, claims, lines) {
+  const wb = new ExcelJS.Workbook();
+  const primary = hex(university.primary_color);
+  const money = '#,##0.00';
+  const sheet = (name, columns, rows) => {
+    const ws = wb.addWorksheet(name);
+    ws.addRow([`${university.name} - ${title}`]).font = { bold: true, size: 13 };
+    ws.addRow([]);
+    const head = ws.addRow(columns.map(([header]) => header));
+    head.eachCell((cell) => {
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: `FF${primary}` } };
+      cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    });
+    columns.forEach(([, key, width, fmt], i) => {
+      ws.getColumn(i + 1).width = width || 16;
+      if (fmt) ws.getColumn(i + 1).numFmt = fmt;
+    });
+    rows.forEach((r) => ws.addRow(columns.map(([, key]) => r[key] ?? '')));
+    return ws;
+  };
+  const schedule = sheet(
+    'Payment schedule',
+    [
+      ['Claim', 'id', 8], ['Lecturer', 'lecturer_name', 26], ['Staff no.', 'lecturer_identifier', 12], ['Department', 'department_name', 24],
+      ['Faculty', 'faculty_name', 26], ['Period', 'title', 18], ['Lectures', 'lecture_count', 10], ['Teaching hours', 'teaching_hours', 14],
+      ['Tasks', 'task_count', 8], [`Amount (${university.currency || 'UGX'})`, 'total', 16, money], ['Status', 'status_label', 18], ['Payment ref.', 'payment_reference', 16],
+    ],
+    claims,
+  );
+  const sum = claims.reduce((t, c) => t + Number(c.total || 0), 0);
+  const totalRow = schedule.addRow(['', 'Total', '', '', '', '', '', '', '', sum]);
+  totalRow.font = { bold: true };
+  totalRow.getCell(10).numFmt = money;
+  sheet(
+    'Claim details',
+    [
+      ['Claim', 'claim_id', 8], ['Lecturer', 'lecturer_name', 24], ['Date', 'work_date', 12], ['Time', 'time', 13], ['Item', 'rate_name', 22],
+      ['Course unit', 'course_unit', 30], ['Classes', 'class_names', 26], ['Students present', 'attendance', 16], ['Details', 'description', 30],
+      ['Quantity', 'quantity', 10], ['Unit', 'unit', 10], ['Rate', 'unit_price', 12, money], ['Amount', 'amount', 14, money],
+    ],
+    lines.map((l) => ({
+      ...l,
+      time: l.start_time ? `${l.start_time}-${l.end_time}` : '',
+      course_unit: l.course_unit_code ? `${l.course_unit_code} ${l.course_unit_name}` : '',
+      attendance: l.students_total ? `${l.students_present} of ${l.students_total}` : '',
+    })),
+  );
+  return Buffer.from(await wb.xlsx.writeBuffer());
+}

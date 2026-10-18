@@ -3,7 +3,7 @@
 import { Router } from 'express';
 import { MANAGER_ROLES, requireRole, TEACHING_ROLES } from '../auth.js';
 import { insert, q, tx, update } from '../db.js';
-import { canManageDepartment, managedDepartmentIds, placeholders, resolveTerm } from '../scope.js';
+import { canManageDepartment, managedDepartmentIds, placeholders, resolveTerm, visibleDepartmentIds } from '../scope.js';
 import { allocationRequirements, crossCuttingUnitCount, pendingCrossCutting } from '../services/allocation-rules.js';
 import { notify } from '../services/notify.js';
 import { allocationContext, checkSession } from '../services/timetable.js';
@@ -50,6 +50,16 @@ router.get('/', (req, res) => {
     params.push(req.user.id);
   } else if (req.user.role === 'student') {
     throw forbidden();
+  } else {
+    const depts = visibleDepartmentIds(req.user);
+    if (depts !== null) {
+      // Units the department owns, or units taught to its classes.
+      const ph = placeholders(depts);
+      where.push(`(cu.department_id IN (${ph}) OR a.id IN (
+        SELECT ac.allocation_id FROM allocation_classes ac JOIN classes c ON c.id = ac.class_id
+          JOIN programs p ON p.id = c.program_id WHERE p.department_id IN (${ph})))`);
+      params.push(...depts, ...depts);
+    }
   }
   for (const [k, col] of [['lecturer_id', 'a.lecturer_id'], ['course_unit_id', 'a.course_unit_id'], ['department_id', 'cu.department_id']]) {
     if (req.query[k]) {
@@ -67,7 +77,7 @@ router.get('/', (req, res) => {
 /** What the curriculum requires this term and how much of it is allocated (cross-cutting first). */
 router.get('/requirements', requireRole(...MANAGER_ROLES), (req, res) => {
   const term = resolveTerm(req.uid, toInt(req.query.term_id));
-  const reqs = allocationRequirements(req.uid, term);
+  const reqs = allocationRequirements(req.uid, term, visibleDepartmentIds(req.user));
   res.json({ term, ...reqs, cross_cutting_units_defined: crossCuttingUnitCount(req.uid) });
 });
 

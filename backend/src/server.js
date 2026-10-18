@@ -12,6 +12,9 @@ if (process.env.SEED_DEMO === 'true' && !q.get('SELECT 1 FROM universities LIMIT
   const { seedDemo } = await import('./seed.js');
   seedDemo({ ownerPassword: process.env.SUPER_ADMIN_PASSWORD || crypto.randomBytes(24).toString('base64url') });
   console.log('Seeded demo data');
+} else if (process.env.SEED_DEMO === 'true') {
+  const { upgradeDemo } = await import('./seed.js');
+  upgradeDemo();
 }
 
 // SUPER_ADMIN_EMAIL + SUPER_ADMIN_PASSWORD create that platform owner account if it doesn't exist yet

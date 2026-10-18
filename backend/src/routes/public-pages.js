@@ -3,7 +3,7 @@
 import { Router } from 'express';
 
 const router = Router();
-const APP = process.env.APP_NAME || 'eCampus MMU';
+const APP = process.env.APP_NAME || 'eCampus';
 const CONTACT = process.env.SUPPORT_EMAIL || '';
 const UPDATED = '12 October 2026';
 

@@ -44,6 +44,7 @@ class RSpec {
     this.canCreate = _always,
     this.canEdit = _always,
     this.canDelete = _always,
+    this.rowEditable,
     this.fromRow,
     this.toPayload,
     this.actions,
@@ -64,6 +65,8 @@ class RSpec {
   final bool Function(AppState app) canCreate;
   final bool Function(AppState app) canEdit;
   final bool Function(AppState app) canDelete;
+  /// Per-row check on top of [canEdit]/[canDelete], e.g. units owned by another department.
+  final bool Function(Map row)? rowEditable;
   final Map<String, dynamic> Function(Map row)? fromRow;
   final Map<String, dynamic> Function(Map<String, dynamic> form, bool creating)? toPayload;
   final List<Widget> Function(BuildContext context, Map row, Future<void> Function() reload)? actions;
@@ -159,10 +162,10 @@ class _ResourceScreenState extends State<ResourceScreen> {
                       ),
                   ]),
                   subtitle: spec.subtitleOf != null ? Text(spec.subtitleOf!(r)) : null,
-                  onTap: spec.canEdit(app) ? () => _openForm(r) : null,
+                  onTap: spec.canEdit(app) && (spec.rowEditable?.call(r) ?? true) ? () => _openForm(r) : null,
                   trailing: Row(mainAxisSize: MainAxisSize.min, children: [
                     ...?spec.actions?.call(context, r, () async => setState(() => _version++)),
-                    if (spec.canDelete(app))
+                    if (spec.canDelete(app) && (spec.rowEditable?.call(r) ?? true))
                       IconButton(icon: const Icon(Icons.delete_outline), tooltip: 'Delete', onPressed: () => _delete(r)),
                   ]),
                 ),

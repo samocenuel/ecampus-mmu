@@ -1,10 +1,11 @@
 import { Link, Navigate } from 'react-router-dom';
 import {
-  AlertTriangle, BookOpen, Building2, CalendarClock, CheckCircle2, Circle, ClipboardCheck, DoorOpen, GraduationCap, Network, School, UserRound, Users,
+  AlertTriangle, BookOpen, Building2, CalendarClock, CheckCircle2, Circle, ClipboardCheck, DoorOpen, GraduationCap, Network, School, UserRound, Users, Wallet,
 } from 'lucide-react';
 import { useAuth } from '../auth';
+import { money } from './Claims';
 import { SessionRow } from '../components/WeekGrid';
-import { Alert, Badge, Button, Card, EmptyState, ErrorNote, PageHeader, Progress, rateTone, Spinner, StatCard } from '../components/ui';
+import { Alert, Badge, Button, Card, EmptyState, ErrorNote, PageHeader, plural, Progress, rateTone, Spinner, StatCard } from '../components/ui';
 import { useFetch } from '../hooks';
 import { MANAGER_ROLES, TEACHING_ROLES } from '../types';
 
@@ -73,12 +74,23 @@ export default function Dashboard() {
           )}
 
           {user.role === 'student' && d.is_class_rep && d.registers_due_today > 0 && (
-            <Alert tone="info" title={`You have ${d.registers_due_today} attendance register(s) to take today`} action={<Link to="/attendance" className="btn btn-sm btn-primary">Take attendance</Link>}>
+            <Alert tone="info" title={`You have ${plural(d.registers_due_today, 'attendance register')} to take today`} action={<Link to="/attendance" className="btn btn-sm btn-primary">Take attendance</Link>}>
               As class representative, mark who is present during each lecture. Your lecturer approves the list.
             </Alert>
           )}
           {teaches && d.my_pending_approvals > 0 && (
-            <Alert tone="warning" title={`${d.my_pending_approvals} attendance register(s) waiting for your approval`} action={<Link to="/attendance?tab=approvals" className="btn btn-sm btn-primary">Review</Link>} />
+            <Alert tone="warning" title={`${plural(d.my_pending_approvals, 'attendance register')} waiting for your approval`} action={<Link to="/attendance?tab=approvals" className="btn btn-sm btn-primary">Review</Link>} />
+          )}
+
+          {d.claims?.awaiting_me > 0 && (
+            <Alert
+              tone="warning"
+              title={`${plural(d.claims.awaiting_me, 'pay claim')} waiting for you (${money(d.claims.awaiting_me_total, d.claims.currency)})`}
+              action={<Link to="/claims" className="btn btn-sm btn-primary">Open claims</Link>}
+            />
+          )}
+          {d.claims?.mine.returned > 0 && (
+            <Alert tone="danger" title={`${plural(d.claims.mine.returned, 'pay claim')} returned to you for correction`} action={<Link to="/claims" className="btn btn-sm btn-primary">Fix</Link>} />
           )}
 
           {user.role === 'admin' && <SetupChecklist d={d} />}
@@ -166,6 +178,24 @@ export default function Dashboard() {
                 <div className="stat-grid compact">
                   <StatCard label="Hours per week" value={d.my_weekly_hours} icon={<CalendarClock size={20} />} />
                   <StatCard label="Registers to approve" value={d.my_pending_approvals} icon={<ClipboardCheck size={20} />} tone={d.my_pending_approvals ? 'warning' : undefined} />
+                </div>
+              </Card>
+            )}
+
+            {d.claims && (d.claims.part_timer || user.role === 'hr') && (
+              <Card title={user.role === 'hr' ? 'Part-time claims' : 'My pay claims'} actions={<Link to="/claims" className="link">Open</Link>}>
+                <div className="stat-grid compact">
+                  {user.role === 'hr' ? (
+                    <>
+                      <StatCard label="To check" value={d.claims.awaiting_me - (d.claims.awaiting_payment || 0)} icon={<Wallet size={20} />} tone={d.claims.awaiting_me ? 'warning' : undefined} />
+                      <StatCard label="Verified, to pay" value={d.claims.awaiting_payment || 0} />
+                    </>
+                  ) : (
+                    <>
+                      <StatCard label="Open claims" value={d.claims.mine.open} icon={<Wallet size={20} />} />
+                      <StatCard label="Paid to me" value={money(d.claims.mine.paid_total, d.claims.currency)} tone="success" />
+                    </>
+                  )}
                 </div>
               </Card>
             )}

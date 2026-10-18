@@ -2,7 +2,7 @@
 import { Router } from 'express';
 import { MANAGER_ROLES, requireRole } from '../auth.js';
 import { insert, q, tx, update } from '../db.js';
-import { assertManageDepartment, managedDepartmentIds, placeholders } from '../scope.js';
+import { assertManageDepartment, canManageDepartment, courseUnitScope, managedDepartmentIds, placeholders, visibleDepartmentIds } from '../scope.js';
 import { crossCuttingUnitCount } from '../services/allocation-rules.js';
 import { notify } from '../services/notify.js';
 import { badRequest, forbidden, needsConfirmation, notFound, pick, requireFields, toInt, truthy } from '../util.js';
@@ -26,6 +26,11 @@ const programSelect = `
 router.get('/programs', (req, res) => {
   const where = ['p.university_id = ?'];
   const params = [req.uid];
+  const depts = visibleDepartmentIds(req.user);
+  if (depts !== null) {
+    where.push(`p.department_id IN (${placeholders(depts)})`);
+    params.push(...depts);
+  }
   if (req.query.department_id) {
     where.push('p.department_id = ?');
     params.push(toInt(req.query.department_id));
@@ -39,6 +44,8 @@ router.get('/programs', (req, res) => {
 
 router.get('/programs/:id', (req, res) => {
   const program = one(`${programSelect} WHERE p.id = ? AND p.university_id = ?`, 'Programme', req.params.id, req.uid);
+  const depts = visibleDepartmentIds(req.user);
+  if (depts !== null && !depts.includes(program.department_id)) throw notFound('Programme');
   program.course_units = q.all(
     `SELECT cu.*, pcu.year_of_study, pcu.semester,
             (SELECT COUNT(*) FROM program_course_units o WHERE o.course_unit_id = cu.id) AS program_count
@@ -141,7 +148,7 @@ function withPrograms(units) {
   const ids = units.map((u) => u.id);
   if (!ids.length) return units;
   const links = q.all(
-    `SELECT pcu.course_unit_id, pcu.year_of_study, pcu.semester, p.id, p.code, p.name
+    `SELECT pcu.course_unit_id, pcu.year_of_study, pcu.semester, p.id, p.code, p.name, p.department_id
        FROM program_course_units pcu JOIN programs p ON p.id = pcu.program_id
       WHERE pcu.course_unit_id IN (${placeholders(ids)}) ORDER BY p.code`,
     ...ids,
@@ -150,13 +157,39 @@ function withPrograms(units) {
     ...u,
     programs: links
       .filter((l) => l.course_unit_id === u.id)
-      .map(({ id, code, name, year_of_study, semester }) => ({ id, code, name, year_of_study, semester })),
+      .map(({ id, code, name, department_id, year_of_study, semester }) => ({ id, code, name, department_id, year_of_study, semester })),
   }));
+}
+
+/**
+ * Adds how each unit relates to the user's departments and whether they may change it:
+ * 'own' (owned and taught only here), 'out' (owned here, also taught to other departments' programmes)
+ * or 'in' (owned elsewhere, taught to one of our programmes).
+ */
+function describeUnits(user, units) {
+  const depts = visibleDepartmentIds(user);
+  const mine = (deptId) => (depts === null ? true : depts.includes(deptId));
+  return withPrograms(units).map((u) => {
+    const programDepts = (u.programs || []).map((p) => p.department_id);
+    let sharing = 'own';
+    if (depts === null) sharing = programDepts.some((d) => d !== u.department_id) ? 'out' : 'own';
+    else if (!mine(u.department_id)) sharing = 'in';
+    else if (programDepts.some((d) => !mine(d))) sharing = 'out';
+    const canManage = MANAGER_ROLES.includes(user.role) && (u.department_id ? canManageDepartment(user, u.department_id) : user.role === 'admin');
+    return { ...u, sharing, can_manage: canManage };
+  });
 }
 
 router.get('/course-units', (req, res) => {
   const where = ['cu.university_id = ?'];
   const params = [req.uid];
+  // A department sees the units it owns and the cross-cutting units taught to its programmes.
+  const depts = visibleDepartmentIds(req.user);
+  if (depts !== null) {
+    const scope = courseUnitScope('cu', depts);
+    where.push(scope.sql);
+    params.push(...scope.params);
+  }
   if (req.query.department_id) {
     where.push('cu.department_id = ?');
     params.push(toInt(req.query.department_id));
@@ -174,7 +207,9 @@ router.get('/course-units', (req, res) => {
     params.push(`%${req.query.q}%`, `%${req.query.q}%`);
   }
   const units = q.all(`${courseUnitSelect} WHERE ${where.join(' AND ')} ORDER BY cu.is_cross_cutting DESC, cu.code`, ...params);
-  res.json(withPrograms(units));
+  let rows = describeUnits(req.user, units);
+  if (['own', 'in', 'out'].includes(req.query.sharing)) rows = rows.filter((u) => u.sharing === req.query.sharing);
+  res.json(rows);
 });
 
 const CU_FIELDS = ['code', 'name', 'credit_units', 'hours_per_week', 'description', 'is_cross_cutting', 'department_id', 'preferred_room_type'];
@@ -231,7 +266,7 @@ router.post('/course-units', requireRole(...MANAGER_ROLES), (req, res) => {
     }
     return cuId;
   });
-  res.status(201).json(withPrograms([q.get(`${courseUnitSelect} WHERE cu.id = ?`, id)])[0]);
+  res.status(201).json(describeUnits(req.user, [q.get(`${courseUnitSelect} WHERE cu.id = ?`, id)])[0]);
 });
 
 router.put('/course-units/:id', requireRole(...MANAGER_ROLES), (req, res) => {
@@ -244,7 +279,7 @@ router.put('/course-units/:id', requireRole(...MANAGER_ROLES), (req, res) => {
     if (n > 1) throw badRequest(`${cu.code} is used by ${n} programmes, so it must stay cross-cutting`);
   }
   update('course_units', cu.id, data);
-  res.json(withPrograms([q.get(`${courseUnitSelect} WHERE cu.id = ?`, cu.id)])[0]);
+  res.json(describeUnits(req.user, [q.get(`${courseUnitSelect} WHERE cu.id = ?`, cu.id)])[0]);
 });
 
 router.delete('/course-units/:id', requireRole(...MANAGER_ROLES), (req, res) => {
@@ -274,9 +309,14 @@ router.get('/classes', (req, res) => {
     where.push('p.department_id = ?');
     params.push(toInt(req.query.department_id));
   }
-  if (truthy(req.query.mine)) {
-    const ids = managedDepartmentIds(req.user);
-    if (ids !== null) {
+  const ids = truthy(req.query.mine) ? managedDepartmentIds(req.user) : visibleDepartmentIds(req.user);
+  if (ids !== null) {
+    if (req.user.role === 'lecturer') {
+      // Lecturers see their department's classes and the classes they teach.
+      where.push(`(p.department_id IN (${placeholders(ids)}) OR c.id IN (
+        SELECT ac.class_id FROM allocation_classes ac JOIN allocations a ON a.id = ac.allocation_id WHERE a.lecturer_id = ?))`);
+      params.push(...ids, req.user.id);
+    } else {
       where.push(`p.department_id IN (${placeholders(ids)})`);
       params.push(...ids);
     }
@@ -292,6 +332,15 @@ function getClass(uid, id) {
 router.get('/classes/:id/students', (req, res) => {
   const cls = getClass(req.uid, req.params.id);
   if (req.user.role === 'student' && req.user.class_id !== cls.id) throw forbidden();
+  if (req.user.role !== 'student') {
+    const depts = visibleDepartmentIds(req.user);
+    const teaches = q.get(
+      'SELECT 1 FROM allocation_classes ac JOIN allocations a ON a.id = ac.allocation_id WHERE ac.class_id = ? AND a.lecturer_id = ?',
+      cls.id,
+      req.user.id,
+    );
+    if (depts !== null && !depts.includes(cls.department_id) && !teaches) throw forbidden('That class is outside your unit');
+  }
   res.json(
     q.all(
       `SELECT id, name, email, identifier, phone, active, (id = ?) AS is_class_rep FROM users

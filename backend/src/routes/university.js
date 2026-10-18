@@ -26,6 +26,10 @@ export function validateUniversityFields(fields) {
     if (!/^#[0-9a-fA-F]{6}$/.test(out.primary_color)) throw badRequest('Primary colour must be a hex value like #1E5AA8');
     out.primary_color = out.primary_color.toUpperCase();
   }
+  if (out.currency !== undefined) {
+    out.currency = String(out.currency).toUpperCase();
+    if (!/^[A-Z]{3}$/.test(out.currency)) throw badRequest('Currency must be a 3-letter code such as UGX');
+  }
   if (out.timezone !== undefined) {
     try {
       new Intl.DateTimeFormat('en', { timeZone: out.timezone });
@@ -56,7 +60,7 @@ router.get('/', (req, res) => {
 router.put('/', requireRole('admin'), (req, res) => {
   const fields = validateUniversityFields(
     pick(req.body, [
-      'name', 'short_name', 'address', 'email', 'phone', 'website', 'primary_color', 'timezone',
+      'name', 'short_name', 'address', 'email', 'phone', 'website', 'primary_color', 'timezone', 'currency',
       'teaching_days', 'day_start', 'day_end', 'lunch_start', 'lunch_end',
     ]),
   );

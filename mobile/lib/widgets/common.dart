@@ -13,6 +13,7 @@ const roleLabels = {
   'hod': 'Head of Department',
   'lecturer': 'Lecturer',
   'student': 'Student',
+  'hr': 'HR (Directorate)',
 };
 
 Api apiOf(BuildContext context) => context.read<AppState>().api;

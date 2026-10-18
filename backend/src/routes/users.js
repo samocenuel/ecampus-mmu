@@ -2,7 +2,8 @@ import crypto from 'node:crypto';
 import { Router } from 'express';
 import { hashPassword, requireRole, STAFF_ROLES } from '../auth.js';
 import { insert, q, tx, update } from '../db.js';
-import { canManageDepartment } from '../scope.js';
+import { isProtectedDemoAccount } from '../demo.js';
+import { canManageDepartment, userScope } from '../scope.js';
 import { badRequest, forbidden, notFound, pick, requireFields, toInt, truthy } from '../util.js';
 import { isEmail, validatePassword } from './auth.js';
 
@@ -10,13 +11,13 @@ const router = Router();
 
 /** Which account types each manager role may create or edit. */
 const MANAGEABLE = {
-  admin: ['admin', 'dean', 'hod', 'lecturer', 'student'],
+  admin: ['admin', 'hr', 'dean', 'hod', 'lecturer', 'student'],
   dean: ['hod', 'lecturer', 'student'],
   hod: ['lecturer', 'student'],
 };
 
 export const userSelect = `
-  SELECT u.id, u.university_id, u.name, u.email, u.role, u.title, u.phone, u.identifier,
+  SELECT u.id, u.university_id, u.name, u.email, u.role, u.employment_type, u.title, u.phone, u.identifier,
          u.faculty_id, u.department_id, u.class_id, u.active, u.created_at,
          f.name AS faculty_name, d.name AS department_name, c.name AS class_name,
          (SELECT COUNT(*) FROM classes rc WHERE rc.class_rep_id = u.id) > 0 AS is_class_rep
@@ -69,7 +70,7 @@ function autoAppoint(userId, data) {
   }
 }
 
-const EDITABLE = ['name', 'email', 'role', 'title', 'phone', 'identifier', 'faculty_id', 'department_id', 'class_id'];
+const EDITABLE = ['name', 'email', 'role', 'employment_type', 'title', 'phone', 'identifier', 'faculty_id', 'department_id', 'class_id'];
 
 function normalise(body) {
   const data = pick(body, EDITABLE);
@@ -79,16 +80,24 @@ function normalise(body) {
     if (!isEmail(data.email)) throw badRequest('Enter a valid email address');
   }
   if (data.name !== undefined) data.name = String(data.name).trim();
-  if (data.role !== undefined && !Object.keys(MANAGEABLE).concat(['lecturer', 'student']).includes(data.role)) {
+  if (data.employment_type !== undefined && !['full_time', 'part_time'].includes(data.employment_type)) {
+    throw badRequest('Employment type must be full_time or part_time');
+  }
+  if (data.role !== undefined && !['admin', 'hr', 'dean', 'hod', 'lecturer', 'student'].includes(data.role)) {
     throw badRequest('Invalid role');
   }
   if (data.role && data.role !== 'student') data.class_id = null;
+  // HR designates sit in the Directorate, outside faculties; students are never part-time staff.
+  if (data.role === 'hr') Object.assign(data, { faculty_id: null, department_id: null });
+  if (data.role === 'student' || data.role === 'hr' || data.role === 'admin') data.employment_type = 'full_time';
   return data;
 }
 
 router.get('/', requireRole(...STAFF_ROLES), (req, res) => {
-  const where = ['u.university_id = ?'];
-  const params = [req.uid];
+  // Everyone sees only the people attached to them (see scope.js userScope).
+  const scope = userScope(req.user);
+  const where = ['u.university_id = ?', scope.sql];
+  const params = [req.uid, ...scope.params];
   const roles = String(req.query.roles || req.query.role || '')
     .split(',')
     .filter(Boolean);
@@ -116,7 +125,8 @@ router.get('/', requireRole(...STAFF_ROLES), (req, res) => {
 });
 
 router.get('/:id', requireRole(...STAFF_ROLES), (req, res) => {
-  const user = q.get(`${userSelect} WHERE u.id = ? AND u.university_id = ?`, req.params.id, req.uid);
+  const scope = userScope(req.user);
+  const user = q.get(`${userSelect} WHERE u.id = ? AND u.university_id = ? AND ${scope.sql}`, req.params.id, req.uid, ...scope.params);
   if (!user) throw notFound('User');
   res.json(user);
 });
@@ -145,6 +155,9 @@ router.put('/:id', requireRole('admin', 'dean', 'hod'), (req, res) => {
   assertCanManage(req.user, existing);
   const data = normalise(req.body);
   if (existing.id === req.user.id && data.role && data.role !== existing.role) throw badRequest('You cannot change your own role');
+  if (isProtectedDemoAccount(existing) && ((data.email && data.email !== existing.email) || (data.role && data.role !== existing.role) || req.body.active !== undefined)) {
+    throw forbidden('This shared demo account keeps its email, role and status');
+  }
   if ('class_id' in data || 'department_id' in data) resolveOrg(req.uid, data);
   assertCanManage(req.user, { ...existing, ...data });
   if (req.body.active !== undefined) {
@@ -170,6 +183,7 @@ router.delete('/:id', requireRole('admin', 'dean', 'hod'), (req, res) => {
   const existing = q.get('SELECT * FROM users WHERE id = ? AND university_id = ?', req.params.id, req.uid);
   if (!existing) throw notFound('User');
   if (existing.id === req.user.id) throw badRequest('You cannot deactivate your own account');
+  if (isProtectedDemoAccount(existing)) throw forbidden('This shared demo account cannot be deactivated');
   assertCanManage(req.user, existing);
   q.run('UPDATE users SET active = 0 WHERE id = ?', existing.id);
   q.run('UPDATE classes SET class_rep_id = NULL WHERE class_rep_id = ?', existing.id);

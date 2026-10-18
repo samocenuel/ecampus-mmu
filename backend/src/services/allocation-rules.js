@@ -7,9 +7,13 @@ import { q } from '../db.js';
  * takes the units its programme lists for the class's year of study and the
  * term's semester. Units are grouped and annotated with allocation progress.
  */
-export function allocationRequirements(universityId, term) {
+/**
+ * What the curriculum needs this term. With `departmentIds`, only pairs that concern those
+ * departments: units they own (every class taking them) and units taught to their classes.
+ */
+export function allocationRequirements(universityId, term, departmentIds = null) {
   if (!term) return { units: [], cross_cutting: [], program_specific: [], summary: emptySummary() };
-  const needs = q.all(
+  const allNeeds = q.all(
     `SELECT cu.id AS course_unit_id, cu.code, cu.name, cu.is_cross_cutting, cu.hours_per_week, cu.credit_units,
             cu.department_id, c.id AS class_id, c.name AS class_name, p.id AS program_id, p.code AS program_code,
             p.department_id AS program_department_id
@@ -22,6 +26,9 @@ export function allocationRequirements(universityId, term) {
     universityId,
     term.semester,
   );
+  const needs = departmentIds === null
+    ? allNeeds
+    : allNeeds.filter((n) => departmentIds.includes(n.department_id) || departmentIds.includes(n.program_department_id));
   const allocated = q.all(
     `SELECT a.id AS allocation_id, a.course_unit_id, ac.class_id, u.name AS lecturer_name
        FROM allocations a

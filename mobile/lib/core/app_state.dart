@@ -55,6 +55,10 @@ class AppState extends ChangeNotifier {
   bool get isStaff => const ['admin', 'dean', 'hod', 'lecturer'].contains(role);
   bool get isClassRep => user?['is_class_rep'] == true;
   bool get isSuperAdmin => role == 'super_admin';
+  bool get isHr => role == 'hr';
+  bool get isPartTimer => teaches && user?['employment_type'] == 'part_time';
+  /// HoDs, Deans, HR and admins take part in approving part-time pay claims.
+  bool get approvesClaims => const ['admin', 'dean', 'hod', 'hr'].contains(role);
   Color get seedColor => hexColor(university?['primary_color'] as String?);
   String? get logoUrl => api.absolute(university?['logo_url'] as String?);
 
@@ -106,6 +110,12 @@ class AppState extends ChangeNotifier {
 
   Future<void> login(String email, String password) async {
     final session = await api.post('/api/auth/login', {'email': email, 'password': password});
+    await _acceptSession(session as Map<String, dynamic>);
+  }
+
+  /// Signs in to the server's Demo University as [role] without an account.
+  Future<void> loginDemo(String role) async {
+    final session = await api.post('/api/auth/demo', {'role': role});
     await _acceptSession(session as Map<String, dynamic>);
   }
 

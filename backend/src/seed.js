@@ -8,6 +8,7 @@
 import { pathToFileURL } from 'node:url';
 import { hashPassword } from './auth.js';
 import { db, insert, q, tx } from './db.js';
+import { recalcTotal, refreshTeachingLines } from './services/pay.js';
 import { generateTimetable } from './services/timetable.js';
 import { addDays, dowOf, toMinutes, zonedNow } from './util.js';
 
@@ -20,6 +21,7 @@ const rand = () => ((seed = (seed * 1664525 + 1013904223) % 4294967296) / 429496
 
 function wipe() {
   for (const t of [
+    'pay_claim_events', 'pay_claim_lines', 'pay_claims', 'pay_rates',
     'notifications', 'notification_prefs', 'attendance_records', 'attendance_registers', 'timetable_sessions',
     'allocation_classes', 'allocations', 'program_course_units', 'course_units', 'classes', 'programs',
     'departments', 'faculties', 'rooms', 'academic_terms', 'users', 'universities',
@@ -54,6 +56,7 @@ export function seedDemo({ quiet = false, ownerPassword = DEMO_PASSWORD } = {}) 
 
     const user = (data) => insert('users', { university_id: uni, password_hash: hash, ...data });
     user({ name: 'Alice Mbabazi', email: 'admin@demo.edu', role: 'admin', title: 'Ms.', identifier: 'ADM-001' });
+    const hrId = user({ name: 'Harriet Nansubuga', email: 'hr@demo.edu', role: 'hr', title: 'Ms.', identifier: 'HR-001' });
 
     // --- Terms (relative to today so the demo always has a live semester) ---
     const today = zonedNow(TZ).date;
@@ -265,10 +268,103 @@ export function seedDemo({ quiet = false, ownerPassword = DEMO_PASSWORD } = {}) 
          JOIN allocations a ON a.id = s.allocation_id WHERE r.status = 'submitted' GROUP BY a.lecturer_id`,
     );
     for (const p of pending) {
-      insert('notifications', { user_id: p.lecturer_id, title: 'Attendance registers awaiting approval', body: `${p.n} register(s) submitted by class representatives need your approval.`, type: 'attendance', link: '/attendance' });
+      insert('notifications', { user_id: p.lecturer_id, title: 'Attendance registers awaiting approval', body: `${p.n} ${p.n === 1 ? 'register' : 'registers'} submitted by class representatives need your approval.`, type: 'attendance', link: '/attendance' });
     }
+
+    seedPay({ uni, today: now.date, hrId, deans: structure.map((f) => lecturer[f.dean[1]]), lecturer });
+    log('Part-time pay: rates and sample claims');
     return { university_id: uni, term_id: term1 };
   });
+}
+
+/**
+ * Adds features introduced after a hosted demo was first seeded (currently part-time pay) to the
+ * existing Demo University, leaving every other tenant untouched. Safe to run on every start.
+ */
+export function upgradeDemo({ quiet = false } = {}) {
+  const uni = q.get("SELECT id FROM universities WHERE slug = 'demo-university'");
+  if (!uni || q.get("SELECT 1 FROM users WHERE email = 'hr@demo.edu'")) return false;
+  return tx(() => {
+    const hrId = insert('users', {
+      university_id: uni.id, name: 'Harriet Nansubuga', email: 'hr@demo.edu', role: 'hr', title: 'Ms.', identifier: 'HR-001',
+      password_hash: hashPassword(DEMO_PASSWORD),
+    });
+    if (!q.get('SELECT 1 FROM pay_rates WHERE university_id = ?', uni.id)) {
+      const lecturer = Object.fromEntries(
+        q.all("SELECT id, name FROM users WHERE university_id = ? AND role IN ('lecturer', 'hod', 'dean')", uni.id).map((u) => [u.name, u.id]),
+      );
+      const deans = q.all('SELECT dean_id FROM faculties WHERE university_id = ? ORDER BY id', uni.id).map((f) => f.dean_id);
+      // Date the sample claims from the demo's own attendance history.
+      const last = q.get('SELECT MAX(lecture_date) AS d FROM attendance_registers WHERE university_id = ?', uni.id).d;
+      if (['Esther Atim', 'Linda Auma', 'Joan Akello'].every((n) => lecturer[n])) {
+        seedPay({ uni: uni.id, today: last ? addDays(last, 1) : zonedNow(TZ).date, hrId, deans, lecturer });
+      }
+    }
+    if (!quiet) console.log('Demo upgraded with part-time pay');
+    return true;
+  });
+}
+
+const periodTitle = (from, to) => {
+  const f = (d, opts) => new Date(`${d}T12:00:00Z`).toLocaleDateString('en-GB', { timeZone: 'UTC', ...opts });
+  return `${f(from, { day: 'numeric', month: 'short' })} - ${f(to, { day: 'numeric', month: 'short', year: 'numeric' })}`;
+};
+
+/** Faculty rates, three part-time lecturers and claims at every stage of the approval chain. */
+function seedPay({ uni, today, hrId, deans, lecturer }) {
+  const faculties = q.all('SELECT id, code, dean_id FROM faculties WHERE university_id = ? ORDER BY id', uni);
+  for (const f of faculties) {
+    for (const [kind, name, unit, amount, description] of [
+      ['teaching', 'Teaching', 'hour', f.code === 'FST' ? 50000 : 45000, 'Per contact hour, from attendance-approved lectures'],
+      ['task', 'Marking', 'script', 2000, 'Coursework and examination scripts'],
+      ['task', 'Internship supervision', 'student', 30000, 'Field visit and report, per student'],
+      ['task', 'Project supervision', 'student', 40000, 'Final-year project, per student'],
+      ['task', 'Invigilation', 'hour', 15000, null],
+    ]) insert('pay_rates', { university_id: uni, faculty_id: f.id, kind, name, unit, amount, description, updated_by: f.dean_id });
+  }
+  for (const name of ['Esther Atim', 'Linda Auma', 'Joan Akello']) q.run("UPDATE users SET employment_type = 'part_time' WHERE id = ?", lecturer[name]);
+
+  const ev = (claimId, actorId, action, stage, note, when) =>
+    insert('pay_claim_events', { claim_id: claimId, actor_id: actorId, action, stage, note, created_at: when });
+  const claim = (name, from, to, status, tasks = []) => {
+    const u = q.get('SELECT * FROM users WHERE id = ?', lecturer[name]);
+    const id = insert('pay_claims', {
+      university_id: uni, lecturer_id: u.id, department_id: u.department_id, faculty_id: u.faculty_id,
+      title: periodTitle(from, to), period_start: from, period_end: to, currency: 'UGX',
+    });
+    refreshTeachingLines(q.get('SELECT * FROM pay_claims WHERE id = ?', id));
+    for (const [rateName, quantity, description] of tasks) {
+      const r = q.get('SELECT * FROM pay_rates WHERE faculty_id = ? AND name = ?', u.faculty_id, rateName);
+      insert('pay_claim_lines', {
+        claim_id: id, kind: 'task', rate_id: r.id, rate_name: r.name, unit: r.unit, unit_price: r.amount,
+        quantity, amount: r.amount * quantity, work_date: to, description,
+      });
+    }
+    recalcTotal(id);
+    const d = q.get('SELECT d.hod_id, f.dean_id FROM departments d JOIN faculties f ON f.id = d.faculty_id WHERE d.id = ?', u.department_id);
+    // Stored in UTC like datetime('now'): 07:00 UTC is 10:00 in Kampala.
+    const at = (days) => `${addDays(to, days)} 07:00:00`;
+    const reached = ['submitted', 'hod_approved', 'dean_approved', 'hr_verified', 'paid'].indexOf(status);
+    ev(id, u.id, 'created', null, null, at(0));
+    if (reached >= 0) ev(id, u.id, 'submitted', null, null, at(1));
+    if (reached >= 1) ev(id, d.hod_id, 'approved', 'HoD', 'Lectures match the timetable and registers.', at(1));
+    if (reached >= 2) ev(id, d.dean_id, 'approved', 'Dean', null, at(2));
+    if (reached >= 3) ev(id, hrId, 'verified', 'HR', 'Within the approved part-time budget.', at(2));
+    if (reached >= 4) ev(id, hrId, 'paid', 'Payment', 'Payment ref. PV-2026-0142', at(3));
+    q.run(
+      'UPDATE pay_claims SET status = ?, submitted_at = ?, payment_reference = ?, paid_at = ?, updated_at = ? WHERE id = ?',
+      status, reached >= 0 ? at(1) : null, status === 'paid' ? 'PV-2026-0142' : null, status === 'paid' ? at(3) : null, at(Math.max(0, reached)), id,
+    );
+    return id;
+  };
+  claim('Esther Atim', addDays(today, -21), addDays(today, -15), 'paid', [['Marking', 45, 'CSC1103 coursework 1 scripts']]);
+  const toHod = claim('Esther Atim', addDays(today, -14), addDays(today, -8), 'submitted', [['Marking', 52, 'CSC1103 test 1 scripts']]);
+  const toDean = claim('Linda Auma', addDays(today, -21), addDays(today, -8), 'hod_approved', [['Internship supervision', 3, 'BIT Year 2 industrial training visits']]);
+  const toHr = claim('Joan Akello', addDays(today, -21), addDays(today, -8), 'dean_approved', [['Marking', 120, 'CCS1101 coursework scripts (four classes)']]);
+  const hod = q.get("SELECT id FROM users WHERE email = 'hod.cs@demo.edu'").id;
+  insert('notifications', { user_id: hod, title: 'Part-time claim to approve', body: 'Ms. Esther Atim has submitted a teaching claim.', type: 'claim', link: `/claims/${toHod}` });
+  insert('notifications', { user_id: deans[0], title: 'Part-time claim to approve', body: 'Ms. Linda Auma: approved by the HoD.', type: 'claim', link: `/claims/${toDean}` });
+  insert('notifications', { user_id: hrId, title: 'Claim to check', body: 'Ms. Joan Akello: approved by the Dean.', type: 'claim', link: `/claims/${toHr}` });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

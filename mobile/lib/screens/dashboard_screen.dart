@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../core/app_state.dart';
 import '../widgets/common.dart';
+import 'claims_screen.dart';
 import 'home_shell.dart';
 
 class DashboardScreen extends StatelessWidget {
@@ -39,17 +40,31 @@ class DashboardScreen extends StatelessWidget {
               style: TextStyle(color: scheme.onSurfaceVariant),
             ),
             const SizedBox(height: 16),
+            if ((d['claims']?['awaiting_me'] ?? 0) > 0)
+              _ActionBanner(
+                icon: Icons.account_balance_wallet_outlined,
+                text: '${d['claims']['awaiting_me']} pay ${d['claims']['awaiting_me'] == 1 ? 'claim is' : 'claims are'} waiting for you (${money(d['claims']['awaiting_me_total'] as num?, d['claims']['currency'] as String?)}).',
+                action: 'Open',
+                onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ClaimsScreen())),
+              ),
+            if ((d['claims']?['mine']?['returned'] ?? 0) > 0)
+              _ActionBanner(
+                icon: Icons.undo,
+                text: 'A pay claim was returned to you for correction.',
+                action: 'Fix',
+                onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ClaimsScreen())),
+              ),
             if (app.isClassRep && (d['registers_due_today'] ?? 0) > 0)
               _ActionBanner(
                 icon: Icons.how_to_reg,
-                text: 'You have ${d['registers_due_today']} attendance register(s) to take today.',
+                text: 'You have ${d['registers_due_today']} attendance ${d['registers_due_today'] == 1 ? 'register' : 'registers'} to take today.',
                 action: 'Take attendance',
                 onTap: () => onNavigate(2),
               ),
             if (app.teaches && (d['my_pending_approvals'] ?? 0) > 0)
               _ActionBanner(
                 icon: Icons.pending_actions,
-                text: '${d['my_pending_approvals']} attendance register(s) waiting for your approval.',
+                text: '${d['my_pending_approvals']} attendance ${d['my_pending_approvals'] == 1 ? 'register' : 'registers'} waiting for your approval.',
                 action: 'Review',
                 onTap: () => onNavigate(2),
               ),

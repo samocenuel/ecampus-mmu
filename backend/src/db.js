@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS universities (
   day_end TEXT NOT NULL DEFAULT '18:00',
   lunch_start TEXT DEFAULT '13:00',
   lunch_end TEXT DEFAULT '14:00',
+  currency TEXT NOT NULL DEFAULT 'UGX',
   active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -36,7 +37,8 @@ CREATE TABLE IF NOT EXISTS users (
   name TEXT NOT NULL,
   email TEXT NOT NULL UNIQUE COLLATE NOCASE,
   password_hash TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('super_admin','admin','dean','hod','lecturer','student')),
+  role TEXT NOT NULL CHECK (role IN ('super_admin','admin','dean','hod','lecturer','student','hr')),
+  employment_type TEXT NOT NULL DEFAULT 'full_time' CHECK (employment_type IN ('full_time','part_time')),
   title TEXT,
   phone TEXT,
   identifier TEXT,
@@ -219,7 +221,137 @@ CREATE TABLE IF NOT EXISTS notifications (
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, read_at);
 `;
 
+// Part-time pay: the Dean sets the faculty's rates; part-time lecturers claim teaching hours (from
+// attendance-approved lectures) and tasks; HoD -> Dean -> HR (Directorate) approve, then HR records payment.
+const PAY_SCHEMA = `
+CREATE TABLE IF NOT EXISTS pay_rates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  university_id INTEGER NOT NULL REFERENCES universities(id) ON DELETE CASCADE,
+  faculty_id INTEGER NOT NULL REFERENCES faculties(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL DEFAULT 'task' CHECK (kind IN ('teaching','task')),
+  name TEXT NOT NULL,
+  unit TEXT NOT NULL DEFAULT 'hour',
+  amount REAL NOT NULL CHECK (amount >= 0),
+  description TEXT,
+  active INTEGER NOT NULL DEFAULT 1,
+  updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_pay_rates_faculty ON pay_rates(faculty_id);
+
+CREATE TABLE IF NOT EXISTS pay_claims (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  university_id INTEGER NOT NULL REFERENCES universities(id) ON DELETE CASCADE,
+  lecturer_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL,
+  faculty_id INTEGER REFERENCES faculties(id) ON DELETE SET NULL,
+  title TEXT NOT NULL,
+  period_start TEXT NOT NULL,
+  period_end TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft'
+    CHECK (status IN ('draft','submitted','hod_approved','dean_approved','hr_verified','paid','rejected')),
+  returned_from TEXT,
+  total REAL NOT NULL DEFAULT 0,
+  currency TEXT NOT NULL DEFAULT 'UGX',
+  payment_reference TEXT,
+  submitted_at TEXT,
+  paid_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_pay_claims_status ON pay_claims(university_id, status);
+CREATE INDEX IF NOT EXISTS idx_pay_claims_lecturer ON pay_claims(lecturer_id);
+
+CREATE TABLE IF NOT EXISTS pay_claim_lines (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  claim_id INTEGER NOT NULL REFERENCES pay_claims(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('teaching','task')),
+  rate_id INTEGER REFERENCES pay_rates(id) ON DELETE SET NULL,
+  rate_name TEXT NOT NULL,
+  unit TEXT NOT NULL,
+  unit_price REAL NOT NULL DEFAULT 0,
+  quantity REAL NOT NULL DEFAULT 0,
+  amount REAL NOT NULL DEFAULT 0,
+  work_date TEXT NOT NULL,
+  start_time TEXT,
+  end_time TEXT,
+  session_id INTEGER REFERENCES timetable_sessions(id) ON DELETE SET NULL,
+  course_unit_code TEXT,
+  course_unit_name TEXT,
+  class_names TEXT,
+  students_present INTEGER,
+  students_total INTEGER,
+  description TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pay_lines_claim ON pay_claim_lines(claim_id);
+-- A lecture (session on a date) can be claimed once.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_pay_lines_lecture ON pay_claim_lines(session_id, work_date) WHERE kind = 'teaching';
+
+CREATE TABLE IF NOT EXISTS pay_claim_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  claim_id INTEGER NOT NULL REFERENCES pay_claims(id) ON DELETE CASCADE,
+  actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  action TEXT NOT NULL,
+  stage TEXT,
+  note TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_pay_events_claim ON pay_claim_events(claim_id);
+`;
+
+/** Brings databases created by earlier versions up to the current schema. */
+function migrate() {
+  const usersSql = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'").get()?.sql || '';
+  if (!usersSql.includes("'hr'")) {
+    // SQLite can't change a CHECK constraint in place, so rebuild the users table (ids and references are kept).
+    db.exec('PRAGMA foreign_keys = OFF');
+    db.exec('BEGIN');
+    try {
+      db.exec(`
+        CREATE TABLE users_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          university_id INTEGER REFERENCES universities(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+          password_hash TEXT NOT NULL,
+          role TEXT NOT NULL CHECK (role IN ('super_admin','admin','dean','hod','lecturer','student','hr')),
+          employment_type TEXT NOT NULL DEFAULT 'full_time' CHECK (employment_type IN ('full_time','part_time')),
+          title TEXT,
+          phone TEXT,
+          identifier TEXT,
+          faculty_id INTEGER REFERENCES faculties(id) ON DELETE SET NULL,
+          department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL,
+          class_id INTEGER REFERENCES classes(id) ON DELETE SET NULL,
+          active INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO users_new (id, university_id, name, email, password_hash, role, title, phone, identifier,
+                               faculty_id, department_id, class_id, active, created_at)
+          SELECT id, university_id, name, email, password_hash, role, title, phone, identifier,
+                 faculty_id, department_id, class_id, active, created_at FROM users;
+        DROP TABLE users;
+        ALTER TABLE users_new RENAME TO users;
+        CREATE INDEX IF NOT EXISTS idx_users_uni_role ON users(university_id, role);
+        CREATE INDEX IF NOT EXISTS idx_users_class ON users(class_id);
+      `);
+      const broken = db.prepare('PRAGMA foreign_key_check').all();
+      if (broken.length) throw new Error(`users migration left ${broken.length} broken references`);
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    } finally {
+      db.exec('PRAGMA foreign_keys = ON');
+    }
+  }
+  const uniCols = db.prepare('PRAGMA table_info(universities)').all().map((c) => c.name);
+  if (!uniCols.includes('currency')) db.exec("ALTER TABLE universities ADD COLUMN currency TEXT NOT NULL DEFAULT 'UGX'");
+}
+
 db.exec(SCHEMA);
+migrate();
+db.exec(PAY_SCHEMA);
 
 // node:sqlite only binds null/number/bigint/string/bytes, so normalise JS values first.
 const bindable = (params) =>

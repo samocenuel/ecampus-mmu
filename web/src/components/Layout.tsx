@@ -2,11 +2,11 @@ import { ReactNode, useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   Bell, BookOpen, Building2, CalendarClock, CalendarDays, ChartColumn, ClipboardCheck, DoorOpen, GraduationCap,
-  KeyRound, Landmark, Layers, LayoutDashboard, LogOut, Menu, Network, School, Settings, UserCog, Users, Workflow, X,
+  KeyRound, Landmark, Layers, LayoutDashboard, LogOut, Menu, Network, School, Settings, UserCog, Users, Wallet, Workflow, X,
 } from 'lucide-react';
 import { api, assetUrl } from '../api';
 import { useAuth } from '../auth';
-import { ROLE_LABELS, Role } from '../types';
+import { ROLE_LABELS, Role, User } from '../types';
 import { Avatar, IconButton } from './ui';
 
 interface NavItem {
@@ -14,7 +14,8 @@ interface NavItem {
   label: string;
   icon: ReactNode;
   roles?: Role[];
-  repOnly?: boolean;
+  /** Extra visibility rule, e.g. part-time lecturers only. */
+  show?: (user: User) => boolean;
 }
 
 const NAV: { section: string; items: NavItem[] }[] = [
@@ -24,7 +25,7 @@ const NAV: { section: string; items: NavItem[] }[] = [
       { to: '/', label: 'Dashboard', icon: <LayoutDashboard size={18} /> },
       { to: '/my-timetable', label: 'My timetable', icon: <CalendarDays size={18} />, roles: ['lecturer', 'hod', 'dean', 'student'] },
       { to: '/attendance', label: 'Attendance', icon: <ClipboardCheck size={18} />, roles: ['admin', 'dean', 'hod', 'lecturer', 'student'] },
-      { to: '/notifications', label: 'Notifications', icon: <Bell size={18} />, roles: ['admin', 'dean', 'hod', 'lecturer', 'student'] },
+      { to: '/notifications', label: 'Notifications', icon: <Bell size={18} />, roles: ['admin', 'dean', 'hod', 'lecturer', 'student', 'hr'] },
     ],
   },
   {
@@ -36,11 +37,22 @@ const NAV: { section: string; items: NavItem[] }[] = [
     ],
   },
   {
+    section: 'Part-time pay',
+    items: [
+      {
+        to: '/claims',
+        label: 'Pay claims',
+        icon: <Wallet size={18} />,
+        show: (u) => ['admin', 'dean', 'hod', 'hr'].includes(u.role) || u.employment_type === 'part_time',
+      },
+    ],
+  },
+  {
     section: 'Setup',
     items: [
       { to: '/setup/university', label: 'University', icon: <Landmark size={18} />, roles: ['admin'] },
-      { to: '/setup/faculties', label: 'Faculties', icon: <Building2 size={18} />, roles: ['admin', 'dean'] },
-      { to: '/setup/departments', label: 'Departments', icon: <Network size={18} />, roles: ['admin', 'dean', 'hod'] },
+      { to: '/setup/faculties', label: 'Faculties', icon: <Building2 size={18} />, roles: ['admin'] },
+      { to: '/setup/departments', label: 'Departments', icon: <Network size={18} />, roles: ['admin', 'dean'] },
       { to: '/setup/programmes', label: 'Programmes', icon: <GraduationCap size={18} />, roles: ['admin', 'dean', 'hod'] },
       { to: '/setup/course-units', label: 'Course units', icon: <BookOpen size={18} />, roles: ['admin', 'dean', 'hod'] },
       { to: '/setup/classes', label: 'Classes', icon: <School size={18} />, roles: ['admin', 'dean', 'hod'] },
@@ -158,11 +170,12 @@ function UserMenu() {
     <div className="user-menu" ref={ref}>
       <button className="user-chip" onClick={() => setOpen((o) => !o)}>
         <Avatar name={user.name} />
-        <span className="hide-sm">
+        <span className="hide-sm user-chip-text">
           <strong>{user.name}</strong>
           <small>
             {ROLE_LABELS[user.role]}
             {user.is_class_rep ? ' · Class rep' : ''}
+            {user.employment_type === 'part_time' ? ' · Part-time' : ''}
           </small>
         </span>
       </button>
@@ -193,7 +206,12 @@ export function Layout() {
 
   const visible = NAV.map((g) => ({
     ...g,
-    items: g.items.filter((i) => (!i.roles || i.roles.includes(user.role)) && (user.role !== 'super_admin' || i.roles?.includes('super_admin') || i.to === '/')),
+    items: g.items.filter(
+      (i) =>
+        (!i.roles || i.roles.includes(user.role)) &&
+        (!i.show || i.show(user)) &&
+        (user.role !== 'super_admin' || i.roles?.includes('super_admin') || i.to === '/'),
+    ),
   })).filter((g) => g.items.length);
 
   const logo = assetUrl(university?.logo_url);
@@ -203,7 +221,7 @@ export function Layout() {
         <div className="brand">
           {logo ? <img src={logo} alt="" className="brand-logo" /> : <div className="brand-mark">{(university?.short_name || university?.name || 'LMS').slice(0, 3).toUpperCase()}</div>}
           <div className="brand-text">
-            <strong>{university?.name || 'Lecture Management'}</strong>
+            <strong>{university?.name || 'eCampus'}</strong>
             <small>{university ? 'Teaching & Learning' : 'Platform administration'}</small>
           </div>
           <IconButton label="Close menu" className="show-sm" onClick={() => setMenuOpen(false)}>

@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import { MANAGER_ROLES, TEACHING_ROLES } from '../auth.js';
 import { q } from '../db.js';
-import { currentTerm, managedDepartmentIds, placeholders, scopeLabel } from '../scope.js';
+import { courseUnitScope, currentTerm, managedDepartmentIds, placeholders, scopeLabel } from '../scope.js';
+import { claimSummary, isPartTimer } from '../services/pay.js';
 import { buildReport } from '../services/reports.js';
 import { sessionsForUser, upcomingForUser } from '../services/schedule.js';
 import { DAY_NAMES, zonedNow } from '../util.js';
@@ -35,7 +36,8 @@ router.get('/', (req, res) => {
       out.counts.course_units = q.get('SELECT COUNT(*) AS n FROM course_units WHERE university_id = ?', req.uid).n;
     } else if (MANAGER_ROLES.includes(user.role)) {
       const depts = managedDepartmentIds(user);
-      out.counts.course_units = q.get(`SELECT COUNT(*) AS n FROM course_units WHERE department_id IN (${placeholders(depts)})`, ...depts).n;
+      const scope = courseUnitScope('cu', depts);
+      out.counts.course_units = q.get(`SELECT COUNT(*) AS n FROM course_units cu WHERE ${scope.sql}`, ...scope.params).n;
     }
   }
 
@@ -49,6 +51,8 @@ router.get('/', (req, res) => {
       ? q.get('SELECT COALESCE(SUM(hours_per_week), 0) AS h FROM allocations WHERE lecturer_id = ? AND term_id = ?', user.id, term.id).h
       : 0;
   }
+
+  if (isPartTimer(user) || ['admin', 'dean', 'hod', 'hr'].includes(user.role)) out.claims = claimSummary(user);
 
   if (user.role === 'student') {
     const row = q.get(

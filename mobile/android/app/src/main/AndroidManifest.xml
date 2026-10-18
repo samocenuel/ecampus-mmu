@@ -8,7 +8,7 @@
     <!-- usesCleartextTraffic lets the app reach a local/LAN demo server over http.
          Use an https API URL in production. -->
     <application
-        android:label="eCampus MMU"
+        android:label="eCampus"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:usesCleartextTraffic="true">

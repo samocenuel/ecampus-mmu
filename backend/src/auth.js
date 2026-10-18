@@ -4,7 +4,7 @@ import { config } from './config.js';
 import { q } from './db.js';
 import { HttpError, forbidden } from './util.js';
 
-export const ROLES = ['super_admin', 'admin', 'dean', 'hod', 'lecturer', 'student'];
+export const ROLES = ['super_admin', 'admin', 'dean', 'hod', 'lecturer', 'student', 'hr'];
 export const MANAGER_ROLES = ['admin', 'dean', 'hod'];
 export const STAFF_ROLES = ['admin', 'dean', 'hod', 'lecturer'];
 /** Roles that can be allocated teaching load. */

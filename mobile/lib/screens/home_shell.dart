@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../core/app_state.dart';
 import '../widgets/common.dart';
 import 'attendance_screen.dart';
+import 'claims_screen.dart';
 import 'dashboard_screen.dart';
 import 'more_screen.dart';
 import 'notifications_screen.dart';
@@ -48,7 +49,7 @@ class _HomeShellState extends State<HomeShell> {
         Text(n['title'] as String, style: const TextStyle(fontWeight: FontWeight.w600)),
         if (n['body'] != null) Text(n['body'] as String),
       ]),
-      action: SnackBarAction(label: 'View', onPressed: () => setState(() => _index = 3)),
+      action: SnackBarAction(label: 'View', onPressed: () => setState(() => _index = _app.isHr ? 2 : 3)),
     ));
   }
 
@@ -56,6 +57,7 @@ class _HomeShellState extends State<HomeShell> {
   Widget build(BuildContext context) {
     final app = context.watch<AppState>();
     if (app.isSuperAdmin) return const PlatformScreen();
+    if (app.isHr) return _hrShell(app);
 
     final pages = <Widget>[
       DashboardScreen(onNavigate: (i) => setState(() => _index = i)),
@@ -73,6 +75,34 @@ class _HomeShellState extends State<HomeShell> {
           const NavigationDestination(icon: Icon(Icons.dashboard_outlined), selectedIcon: Icon(Icons.dashboard), label: 'Home'),
           const NavigationDestination(icon: Icon(Icons.calendar_month_outlined), selectedIcon: Icon(Icons.calendar_month), label: 'Timetable'),
           const NavigationDestination(icon: Icon(Icons.fact_check_outlined), selectedIcon: Icon(Icons.fact_check), label: 'Attendance'),
+          NavigationDestination(
+            icon: Badge(isLabelVisible: app.unread > 0, label: Text('${app.unread}'), child: const Icon(Icons.notifications_outlined)),
+            selectedIcon: const Icon(Icons.notifications),
+            label: 'Alerts',
+          ),
+          const NavigationDestination(icon: Icon(Icons.menu), label: 'More'),
+        ],
+      ),
+    );
+  }
+
+  /// HR (Directorate) only handles pay claims, so it gets a shorter menu.
+  Widget _hrShell(AppState app) {
+    final pages = <Widget>[
+      DashboardScreen(onNavigate: (i) => setState(() => _index = i)),
+      const ClaimsScreen(asTab: true),
+      const NotificationsScreen(),
+      const MoreScreen(),
+    ];
+    final index = _index.clamp(0, pages.length - 1);
+    return Scaffold(
+      body: IndexedStack(index: index, children: pages),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: index,
+        onDestinationSelected: (i) => setState(() => _index = i),
+        destinations: [
+          const NavigationDestination(icon: Icon(Icons.dashboard_outlined), selectedIcon: Icon(Icons.dashboard), label: 'Home'),
+          const NavigationDestination(icon: Icon(Icons.account_balance_wallet_outlined), selectedIcon: Icon(Icons.account_balance_wallet), label: 'Claims'),
           NavigationDestination(
             icon: Badge(isLabelVisible: app.unread > 0, label: Text('${app.unread}'), child: const Icon(Icons.notifications_outlined)),
             selectedIcon: const Icon(Icons.notifications),

@@ -6,6 +6,12 @@ import { Alert, Badge, Button, IconButton, Select, Tabs } from '../../components
 import { useFetch, usePersistentState } from '../../hooks';
 
 type Filter = 'all' | 'cc' | 'program';
+type Sharing = 'all' | 'own' | 'in' | 'out';
+
+const SHARING_BADGE: Record<string, { tone: 'info' | 'primary'; label: string; title: string }> = {
+  in: { tone: 'info', label: 'Shared in', title: 'Owned by another department and taught to your programmes' },
+  out: { tone: 'primary', label: 'Shared out', title: 'Owned by your department and also taught to other departments' },
+};
 
 function ProgrammeLinks({ form, setForm, programs }: { form: any; setForm: (f: any) => void; programs: any[] }) {
   const links: any[] = form.programs || [];
@@ -38,26 +44,37 @@ function ProgrammeLinks({ form, setForm, programs }: { form: any; setForm: (f: a
 }
 
 export default function CourseUnits() {
-  const { hasRole } = useAuth();
+  const { hasRole, user } = useAuth();
   const [filter, setFilter] = usePersistentState<Filter>('lms_cu_filter', 'all');
+  const [sharing, setSharing] = usePersistentState<Sharing>('lms_cu_sharing', 'all');
+  // Deans and HoDs see their own units plus the ones crossing their department boundary.
+  const scoped = hasRole('dean', 'hod');
+  const unitName = user?.role === 'dean' ? 'faculty' : 'department';
   const { data: departments } = useFetch<any[]>('/api/departments');
   const { data: programs } = useFetch<any[]>('/api/programs');
   const { data: ccUnits, reload: reloadCc } = useFetch<any[]>('/api/course-units?cross_cutting=1');
   const canManage = hasRole('admin', 'dean', 'hod');
-  const query = filter === 'cc' ? '?cross_cutting=1' : filter === 'program' ? '?cross_cutting=0' : '';
+  const params = new URLSearchParams();
+  if (filter !== 'all') params.set('cross_cutting', filter === 'cc' ? '1' : '0');
+  if (scoped && sharing !== 'all') params.set('sharing', sharing);
+  const query = params.toString() ? `?${params}` : '';
 
   return (
     <ResourcePage
-      key={filter}
+      key={query}
       title="Course units"
-      subtitle="Course units with their codes and details. Cross-cutting units are shared across programmes and are allocated first."
+      subtitle={
+        scoped
+          ? `Units your ${unitName} owns, plus cross-cutting units shared in from, or out to, other departments.`
+          : 'Course units with their codes and details. Cross-cutting units are shared across programmes and are allocated first.'
+      }
       noun="Course unit"
       endpoint="/api/course-units"
       query={query}
       searchKeys={['code', 'name', 'department_name']}
       canCreate={canManage}
-      canEdit={() => canManage}
-      canDelete={() => canManage}
+      canEdit={(u: any) => canManage && u.can_manage}
+      canDelete={(u: any) => canManage && u.can_manage}
       onSaved={() => reloadCc()}
       before={() => (
         <>
@@ -66,15 +83,29 @@ export default function CourseUnits() {
               Units such as Communication Skills or Entrepreneurship are taken by several programmes. Create them (tick "Cross-cutting") before programme-specific units - you'll be warned otherwise.
             </Alert>
           )}
-          <Tabs
-            value={filter}
-            onChange={setFilter}
-            tabs={[
-              { value: 'all', label: 'All units' },
-              { value: 'cc', label: 'Cross-cutting', count: ccUnits?.length },
-              { value: 'program', label: 'Programme-specific' },
-            ]}
-          />
+          <div className="tab-row">
+            <Tabs
+              value={filter}
+              onChange={setFilter}
+              tabs={[
+                { value: 'all', label: 'All units' },
+                { value: 'cc', label: 'Cross-cutting', count: ccUnits?.length },
+                { value: 'program', label: 'Programme-specific' },
+              ]}
+            />
+            {scoped && (
+              <Tabs
+                value={sharing}
+                onChange={setSharing}
+                tabs={[
+                  { value: 'all', label: 'Any owner' },
+                  { value: 'own', label: `Our ${unitName}` },
+                  { value: 'in', label: 'Shared in' },
+                  { value: 'out', label: 'Shared out' },
+                ]}
+              />
+            )}
+          </div>
         </>
       )}
       columns={[
@@ -91,7 +122,21 @@ export default function CourseUnits() {
             </>
           ),
         },
-        { key: 'department_name', header: 'Department', hideOnMobile: true, render: (u: any) => u.department_name || <span className="muted">University-wide</span> },
+        {
+          key: 'department_name',
+          header: 'Owning department',
+          hideOnMobile: true,
+          render: (u: any) => (
+            <div className="cell-stack">
+              <span>{u.department_name || <span className="muted">University-wide</span>}</span>
+              {scoped && SHARING_BADGE[u.sharing] && (
+                <span title={SHARING_BADGE[u.sharing].title}>
+                  <Badge tone={SHARING_BADGE[u.sharing].tone}>{SHARING_BADGE[u.sharing].label}</Badge>
+                </span>
+              )}
+            </div>
+          ),
+        },
         {
           key: 'programs',
           header: 'Programmes',

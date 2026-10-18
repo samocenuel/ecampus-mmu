@@ -50,7 +50,7 @@ export default function Reports() {
       {r && (
         <div className="stack">
           <div className="stat-grid">
-            {!isLecturer && <StatCard label="Departments" value={r.counts.departments} />}
+            {['admin', 'dean'].includes(user?.role || '') && <StatCard label="Departments" value={r.counts.departments} />}
             {!isLecturer && <StatCard label="Programmes" value={r.counts.programs} />}
             <StatCard label="Classes" value={r.counts.classes} />
             <StatCard label="Students" value={r.counts.students} />

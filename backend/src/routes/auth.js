@@ -1,8 +1,9 @@
 import crypto from 'node:crypto';
 import { Router } from 'express';
 import { authenticate, hashPassword, loadUser, signToken, verifyPassword } from '../auth.js';
+import { DEMO_ROLES, demoUniversity, isProtectedDemoAccount } from '../demo.js';
 import { insert, q, tx } from '../db.js';
-import { badRequest, HttpError, pick, requireFields, slugify } from '../util.js';
+import { badRequest, forbidden, HttpError, notFound, pick, requireFields, slugify } from '../util.js';
 import { universityPayload, validateUniversityFields } from './university.js';
 
 const router = Router();
@@ -62,12 +63,32 @@ router.post('/login', (req, res) => {
   res.json(session(row.id));
 });
 
+/** Demo roles a visitor can try without an account (empty when the demo university is absent). */
+router.get('/demo', (_req, res) => {
+  const uni = demoUniversity();
+  const exists = (email) => q.get('SELECT 1 FROM users WHERE email = ? AND university_id = ? AND active = 1', email, uni.id);
+  const roles = uni ? DEMO_ROLES.filter((r) => exists(r.email)).map(({ key, label, description }) => ({ key, label, description })) : [];
+  res.json({ available: roles.length > 0, roles });
+});
+
+/** Sign in to the Demo University as one of the demo roles: no account or password needed. */
+router.post('/demo', (req, res) => {
+  const uni = demoUniversity();
+  if (!uni) throw notFound('Demo');
+  const role = DEMO_ROLES.find((r) => r.key === req.body?.role);
+  if (!role) throw badRequest('Choose one of the demo roles');
+  const user = q.get('SELECT id FROM users WHERE email = ? AND university_id = ? AND active = 1', role.email, uni.id);
+  if (!user) throw notFound('Demo account');
+  res.json({ ...session(user.id), demo: true });
+});
+
 router.get('/me', authenticate, (req, res) => {
   const { token, ...rest } = session(req.user.id);
   res.json(rest);
 });
 
 router.post('/change-password', authenticate, (req, res) => {
+  if (isProtectedDemoAccount(req.user)) throw forbidden('The demo accounts are shared, so their passwords cannot be changed');
   const { current_password, new_password } = req.body || {};
   const row = q.get('SELECT password_hash FROM users WHERE id = ?', req.user.id);
   if (!verifyPassword(String(current_password || ''), row.password_hash)) throw badRequest('Current password is incorrect');
@@ -81,6 +102,7 @@ router.post('/change-password', authenticate, (req, res) => {
  * account disabled; anonymised teaching/attendance records are kept for the university's statistics.
  */
 router.post('/delete-account', authenticate, (req, res) => {
+  if (isProtectedDemoAccount(req.user)) throw forbidden('The demo accounts are shared, so they cannot be deleted');
   const row = q.get('SELECT password_hash FROM users WHERE id = ?', req.user.id);
   if (!verifyPassword(String(req.body?.password || ''), row.password_hash)) throw badRequest('Password is incorrect');
   if (req.user.role === 'super_admin') throw badRequest('The platform owner account cannot be deleted here');

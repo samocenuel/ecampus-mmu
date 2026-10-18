@@ -42,7 +42,7 @@ class LmsApp extends StatelessWidget {
     final app = context.watch<AppState>();
     final seed = app.seedColor;
     return MaterialApp(
-      title: app.university?['short_name'] as String? ?? 'eCampus MMU',
+      title: app.university?['short_name'] as String? ?? 'eCampus',
       debugShowCheckedModeBanner: false,
       theme: buildTheme(seed, Brightness.light),
       darkTheme: buildTheme(seed, Brightness.dark),

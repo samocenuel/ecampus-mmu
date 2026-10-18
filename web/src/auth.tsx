@@ -1,5 +1,5 @@
 import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import { api, getToken, setToken, setUnauthorizedHandler } from './api';
+import { api, ApiError, getToken, setToken, setUnauthorizedHandler } from './api';
 import { applyTheme } from './theme';
 import type { Role, University, User } from './types';
 
@@ -8,6 +8,7 @@ interface AuthState {
   university: University | null;
   loading: boolean;
   login: (email: string, password: string) => Promise<void>;
+  loginDemo: (role: string) => Promise<void>;
   acceptSession: (session: { token: string; user: User; university: University | null }) => void;
   logout: () => void;
   refresh: () => Promise<void>;
@@ -25,7 +26,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const setUniversity = useCallback((u: University | null) => {
     setUni(u);
     applyTheme(u?.primary_color);
-    document.title = u ? `${u.short_name || u.name} - Lecture Management` : 'Lecture Management System';
+    document.title = u ? `${u.short_name || u.name} · eCampus` : 'eCampus';
   }, []);
 
   const logout = useCallback(() => {
@@ -40,10 +41,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const me = await api<{ user: User; university: University | null }>('/api/auth/me');
       setUser(me.user);
       setUniversity(me.university);
-    } catch {
-      logout();
-    } finally {
       setLoading(false);
+    } catch (err) {
+      // Only a rejected session signs the user out; if the server is briefly unreachable, try again.
+      if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+        logout();
+        setLoading(false);
+      } else {
+        setTimeout(() => refresh(), 4000);
+      }
     }
   }, [logout, setUniversity]);
 
@@ -70,19 +76,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [acceptSession],
   );
 
+  const loginDemo = useCallback(
+    async (role: string) => {
+      const s = await api('/api/auth/demo', { method: 'POST', body: { role } });
+      acceptSession(s);
+    },
+    [acceptSession],
+  );
+
   const value = useMemo<AuthState>(
     () => ({
       user,
       university,
       loading,
       login,
+      loginDemo,
       acceptSession,
       logout,
       refresh,
       setUniversity,
       hasRole: (...roles) => Boolean(user && roles.includes(user.role)),
     }),
-    [user, university, loading, login, acceptSession, logout, refresh, setUniversity],
+    [user, university, loading, login, loginDemo, acceptSession, logout, refresh, setUniversity],
   );
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

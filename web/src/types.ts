@@ -1,4 +1,4 @@
-export type Role = 'super_admin' | 'admin' | 'dean' | 'hod' | 'lecturer' | 'student';
+export type Role = 'super_admin' | 'admin' | 'dean' | 'hod' | 'lecturer' | 'student' | 'hr';
 
 export interface User {
   id: number;
@@ -6,6 +6,7 @@ export interface User {
   name: string;
   email: string;
   role: Role;
+  employment_type?: 'full_time' | 'part_time';
   title?: string | null;
   phone?: string | null;
   identifier?: string | null;
@@ -30,6 +31,7 @@ export interface University {
   website?: string | null;
   logo_url?: string | null;
   primary_color: string;
+  currency?: string;
   timezone: string;
   teaching_days: number[];
   day_start: string;
@@ -87,6 +89,7 @@ export const ROLE_LABELS: Record<Role, string> = {
   hod: 'Head of Department',
   lecturer: 'Lecturer',
   student: 'Student',
+  hr: 'HR (Directorate)',
 };
 
 export const DAY_NAMES = ['', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];

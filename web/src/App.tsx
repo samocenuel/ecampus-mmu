@@ -7,6 +7,7 @@ import { Layout } from './components/Layout';
 import { EmptyState, Spinner } from './components/ui';
 import Allocation from './pages/Allocation';
 import Attendance, { RegisterPage } from './pages/Attendance';
+import Claims, { ClaimDetail } from './pages/Claims';
 import Dashboard from './pages/Dashboard';
 import Login from './pages/Login';
 import MyTimetable from './pages/MyTimetable';
@@ -70,13 +71,15 @@ export default function App() {
               <Route path="my-timetable" element={<Only roles={['lecturer', 'hod', 'dean', 'student']}><MyTimetable /></Only>} />
               <Route path="attendance" element={<Only roles={MEMBERS}><Attendance /></Only>} />
               <Route path="attendance/registers/:id" element={<Only roles={MEMBERS}><RegisterPage /></Only>} />
-              <Route path="notifications" element={<Only roles={MEMBERS}><Notifications /></Only>} />
+              <Route path="notifications" element={<Only roles={[...MEMBERS, 'hr']}><Notifications /></Only>} />
+              <Route path="claims" element={<Only roles={[...STAFF, 'hr']}><Claims /></Only>} />
+              <Route path="claims/:id" element={<Only roles={[...STAFF, 'hr']}><ClaimDetail /></Only>} />
               <Route path="allocation" element={<Only roles={MANAGERS}><Allocation /></Only>} />
               <Route path="timetable" element={<Only roles={STAFF}><Timetable /></Only>} />
               <Route path="reports" element={<Only roles={STAFF}><Reports /></Only>} />
               <Route path="setup/university" element={<Only roles={['admin']}><UniversitySettings /></Only>} />
-              <Route path="setup/faculties" element={<Only roles={['admin', 'dean']}><Faculties /></Only>} />
-              <Route path="setup/departments" element={<Only roles={MANAGERS}><Departments /></Only>} />
+              <Route path="setup/faculties" element={<Only roles={['admin']}><Faculties /></Only>} />
+              <Route path="setup/departments" element={<Only roles={['admin', 'dean']}><Departments /></Only>} />
               <Route path="setup/programmes" element={<Only roles={MANAGERS}><Programmes /></Only>} />
               <Route path="setup/programmes/:id" element={<Only roles={MANAGERS}><ProgrammeDetail /></Only>} />
               <Route path="setup/course-units" element={<Only roles={MANAGERS}><CourseUnits /></Only>} />

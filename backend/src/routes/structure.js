@@ -2,7 +2,7 @@
 import { Router } from 'express';
 import { requireRole } from '../auth.js';
 import { insert, q, tx, update } from '../db.js';
-import { facultyIdsForDean } from '../scope.js';
+import { facultyIdsForDean, placeholders, visibleDepartmentIds, visibleFacultyIds } from '../scope.js';
 import { badRequest, forbidden, notFound, pick, requireFields, toInt } from '../util.js';
 
 const router = Router();
@@ -34,7 +34,9 @@ const facultySelect = `
     FROM faculties f LEFT JOIN users u ON u.id = f.dean_id`;
 
 router.get('/faculties', (req, res) => {
-  res.json(q.all(`${facultySelect} WHERE f.university_id = ? ORDER BY f.name`, req.uid));
+  const facs = visibleFacultyIds(req.user);
+  if (facs === null) return res.json(q.all(`${facultySelect} WHERE f.university_id = ? ORDER BY f.name`, req.uid));
+  res.json(q.all(`${facultySelect} WHERE f.university_id = ? AND f.id IN (${placeholders(facs)}) ORDER BY f.name`, req.uid, ...facs));
 });
 
 router.post('/faculties', requireRole('admin'), (req, res) => {
@@ -74,11 +76,19 @@ const departmentSelect = `
     LEFT JOIN users h ON h.id = d.hod_id`;
 
 router.get('/departments', (req, res) => {
+  const where = ['d.university_id = ?'];
+  const params = [req.uid];
   const facultyId = toInt(req.query.faculty_id);
-  const rows = facultyId
-    ? q.all(`${departmentSelect} WHERE d.university_id = ? AND d.faculty_id = ? ORDER BY d.name`, req.uid, facultyId)
-    : q.all(`${departmentSelect} WHERE d.university_id = ? ORDER BY f.name, d.name`, req.uid);
-  res.json(rows);
+  if (facultyId) {
+    where.push('d.faculty_id = ?');
+    params.push(facultyId);
+  }
+  const depts = visibleDepartmentIds(req.user);
+  if (depts !== null) {
+    where.push(`d.id IN (${placeholders(depts)})`);
+    params.push(...depts);
+  }
+  res.json(q.all(`${departmentSelect} WHERE ${where.join(' AND ')} ORDER BY f.name, d.name`, ...params));
 });
 
 function assertManageFaculty(user, facultyId) {

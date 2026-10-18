@@ -4,13 +4,13 @@ import { api } from '../api';
 import { useAuth } from '../auth';
 import { useFeedback } from '../components/feedback';
 import { FieldDef, ResourcePage } from '../components/ResourcePage';
-import { Alert, Badge, Button, DataTable, Field, IconButton, Input, Modal, Progress, rateTone, Select, Spinner, StatCard, Tabs, Textarea } from '../components/ui';
+import { Alert, Badge, Button, DataTable, Field, IconButton, Input, Modal, plural, Progress, rateTone, Select, Spinner, StatCard, Tabs, Textarea } from '../components/ui';
 import { useFetch, usePersistentState } from '../hooks';
 import { ROLE_LABELS, Role } from '../types';
 
 type Tab = 'staff' | 'students' | 'admins';
-const TAB_ROLES: Record<Tab, string> = { staff: 'lecturer,hod,dean', students: 'student', admins: 'admin' };
-const CREATABLE: Record<string, Role[]> = { admin: ['admin', 'dean', 'hod', 'lecturer', 'student'], dean: ['hod', 'lecturer', 'student'], hod: ['lecturer', 'student'] };
+const TAB_ROLES: Record<Tab, string> = { staff: 'lecturer,hod,dean', students: 'student', admins: 'admin,hr' };
+const CREATABLE: Record<string, Role[]> = { admin: ['admin', 'hr', 'dean', 'hod', 'lecturer', 'student'], dean: ['hod', 'lecturer', 'student'], hod: ['lecturer', 'student'] };
 
 function TempPassword({ info, onClose }: { info: { name: string; password: string; count?: number } | null; onClose: () => void }) {
   const { toast } = useFeedback();
@@ -18,7 +18,7 @@ function TempPassword({ info, onClose }: { info: { name: string; password: strin
   return (
     <Modal open onClose={onClose} title="Temporary password" footer={<Button onClick={onClose}>Done</Button>}>
       <p>
-        {info.count ? `${info.count} account(s) were created` : `${info.name}'s account was created`} with this temporary password. Share it securely - it is shown only once, and users can change it from their profile.
+        {info.count ? `${plural(info.count, 'account')} ${info.count === 1 ? 'was' : 'were'} created` : `${info.name}'s account was created`} with this temporary password. Share it securely - it is shown only once, and users can change it from their profile.
       </p>
       <div className="secret">
         <code>{info.password}</code>
@@ -72,7 +72,7 @@ function ImportDialog({ tab, onClose, onDone }: { tab: Tab; onClose: () => void;
     >
       {result ? (
         <div className="stack">
-          <Alert tone={result.errors.length ? 'warning' : 'success'} title={`${result.created} account(s) created`}>
+          <Alert tone={result.errors.length ? 'warning' : 'success'} title={`${plural(result.created, 'account')} created`}>
             {result.errors.length > 0 && (
               <ul className="detail-list">
                 {result.errors.map((e: any) => (
@@ -152,9 +152,9 @@ export default function Users() {
   const { data: classes } = useFetch<any[]>('/api/classes');
   const creatable = (CREATABLE[user!.role] || []).filter((r) => TAB_ROLES[tab].split(',').includes(r));
   const tabs = [
-    { value: 'staff' as Tab, label: 'Lecturers, HoDs & Deans' },
+    { value: 'staff' as Tab, label: user!.role === 'admin' ? 'Lecturers, HoDs & Deans' : user!.role === 'dean' ? 'Faculty staff' : 'Department staff' },
     { value: 'students' as Tab, label: 'Students' },
-    ...(user!.role === 'admin' ? [{ value: 'admins' as Tab, label: 'Administrators' }] : []),
+    ...(user!.role === 'admin' ? [{ value: 'admins' as Tab, label: 'Administrators & HR' }] : []),
   ];
 
   const fields: FieldDef[] = [
@@ -164,6 +164,18 @@ export default function Users() {
     { name: 'email', label: 'Email', type: 'email', required: true },
     { name: 'phone', label: 'Phone', type: 'tel' },
     { name: 'identifier', label: tab === 'students' ? 'Registration number' : 'Staff number' },
+    {
+      name: 'employment_type',
+      label: 'Employment',
+      type: 'select',
+      noPlaceholder: true,
+      defaultValue: 'full_time',
+      showIf: (f) => ['lecturer', 'hod', 'dean'].includes(f.role),
+      options: [
+        { value: 'full_time', label: 'Full-time' },
+        { value: 'part_time', label: 'Part-time (paid per hour and task)' },
+      ],
+    },
     { name: 'faculty_id', label: 'Faculty', type: 'select', showIf: (f) => f.role === 'dean', options: (faculties || []).map((x) => ({ value: x.id, label: x.name })), help: 'A new Dean is appointed to the faculty if it has none.' },
     {
       name: 'department_id',
@@ -192,8 +204,12 @@ export default function Users() {
       <ResourcePage
         key={`${tab}-${version}`}
         title="Users"
-        subtitle="Accounts for administrators, Deans, Heads of Department, lecturers and students."
-        noun={tab === 'students' ? 'Student' : tab === 'admins' ? 'Administrator' : 'Staff member'}
+        subtitle={
+          user!.role === 'admin'
+            ? 'Accounts for administrators, Deans, Heads of Department, lecturers and students.'
+            : `Staff and students of ${user!.role === 'dean' ? user!.faculty_name || 'your faculty' : user!.department_name || 'your department'}.`
+        }
+        noun={tab === 'students' ? 'Student' : tab === 'admins' ? 'Account' : 'Staff member'}
         endpoint="/api/users"
         query={`?roles=${TAB_ROLES[tab]}`}
         searchKeys={['name', 'email', 'identifier', 'department_name', 'class_name']}
@@ -218,13 +234,14 @@ export default function Users() {
                   {u.name}
                 </strong>{' '}
                 {u.is_class_rep ? <Badge tone="primary">Class rep</Badge> : null}
+                {u.employment_type === 'part_time' ? <Badge tone="info">Part-time</Badge> : null}
                 <div className="muted small">{u.email}</div>
               </>
             ),
           },
           { key: 'role', header: 'Role', render: (u: any) => ROLE_LABELS[u.role as Role], hideOnMobile: tab === 'students' },
           { key: 'identifier', header: tab === 'students' ? 'Reg. no.' : 'Staff no.', hideOnMobile: true },
-          { key: 'unit', header: tab === 'students' ? 'Class' : 'Unit', render: (u: any) => u.class_name || u.department_name || u.faculty_name || '-' },
+          { key: 'unit', header: tab === 'students' ? 'Class' : 'Unit', render: (u: any) => u.class_name || u.department_name || u.faculty_name || (u.role === 'hr' ? 'Directorate' : '-') },
           { key: 'active', header: 'Status', render: (u: any) => (u.active ? <Badge tone="success">Active</Badge> : <Badge>Inactive</Badge>) },
         ]}
         rowActions={(u: any, reload) => (
@@ -242,10 +259,11 @@ export default function Users() {
           </>
         )}
         fields={fields}
-        fromRow={(u: any) => ({ role: u.role, title: u.title || '', name: u.name, email: u.email, phone: u.phone || '', identifier: u.identifier || '', faculty_id: u.faculty_id || '', department_id: u.department_id || '', class_id: u.class_id || '', password: '' })}
+        fromRow={(u: any) => ({ role: u.role, employment_type: u.employment_type || 'full_time', title: u.title || '', name: u.name, email: u.email, phone: u.phone || '', identifier: u.identifier || '', faculty_id: u.faculty_id || '', department_id: u.department_id || '', class_id: u.class_id || '', password: '' })}
         toPayload={(f) => {
           const body: any = { ...f };
           for (const k of ['faculty_id', 'department_id', 'class_id']) body[k] = body[k] || null;
+          if (!['lecturer', 'hod', 'dean'].includes(body.role)) delete body.employment_type;
           if (!body.password) delete body.password;
           return body;
         }}

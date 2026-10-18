@@ -283,16 +283,16 @@ describe('Account deletion and public pages', () => {
     assert.deepEqual(row, { name: 'Deleted user', email: `deleted-${me.id}@deleted.invalid`, phone: null, identifier: null, active: 0 });
     const relogin = await api('POST', '/api/auth/login', { body: { email, password: DEMO_PASSWORD } });
     assert.equal(relogin.status, 401);
-    // The only administrator cannot delete themselves.
+    // The shared demo administrator cannot be deleted (the last-admin rule is checked after this).
     const admin = await api('POST', '/api/auth/delete-account', { token: await login('admin@demo.edu'), body: { password: DEMO_PASSWORD } });
-    assert.equal(admin.status, 400);
+    assert.equal(admin.status, 403); // shared demo accounts cannot be deleted
   });
 
   test('privacy policy and account deletion pages are public', async () => {
     for (const path of ['/privacy', '/account-deletion']) {
       const res = await fetch(base + path);
       assert.equal(res.status, 200);
-      assert.match(await res.text(), /eCampus MMU/);
+      assert.match(await res.text(), /eCampus/);
     }
   });
 });
@@ -359,5 +359,156 @@ describe('Hosting under a sub-path', () => {
       sub.closeAllConnections();
       sub.close();
     }
+  });
+});
+
+describe('Role scopes and demo access', () => {
+  const codes = (rows, key = 'code') => rows.map((r) => r[key]).sort();
+
+  test('a HoD sees only their department, its programmes and the course units that concern it', async () => {
+    const token = await login('hod.cs@demo.edu');
+    const depts = (await api('GET', '/api/departments', { token })).data;
+    assert.deepEqual(codes(depts), ['CS']);
+    assert.deepEqual(codes((await api('GET', '/api/faculties', { token })).data), ['FST']);
+    assert.deepEqual(codes((await api('GET', '/api/programs', { token })).data), ['BSCS']);
+    const units = codes((await api('GET', '/api/course-units', { token })).data);
+    assert.ok(units.includes('CSC1101') && units.includes('CCS1101'), 'own units and cross-cutting units taught to BSCS');
+    assert.ok(!units.includes('BIT1101') && !units.includes('ACC1101'), 'no other departments\' own units');
+    const classes = (await api('GET', '/api/classes', { token })).data;
+    assert.ok(classes.length > 0 && classes.every((c) => c.program_code === 'BSCS'));
+  });
+
+  test('course units say whether they are shared in or out, and only the owner may change them', async () => {
+    const token = await login('hod.cs@demo.edu');
+    const all = (await api('GET', '/api/course-units', { token })).data;
+    const byCode = Object.fromEntries(all.map((u) => [u.code, u]));
+    assert.equal(byCode.CCS1101.sharing, 'in');
+    assert.equal(byCode.CCS1101.can_manage, false);
+    assert.equal(byCode.CEP2102.sharing, 'out');
+    assert.equal(byCode.CSC1101.sharing, 'own');
+    assert.equal(byCode.CSC1101.can_manage, true);
+    const shared = (await api('GET', '/api/course-units?sharing=in', { token })).data;
+    assert.ok(shared.length > 0 && shared.every((u) => u.sharing === 'in'));
+    assert.equal((await api('PUT', `/api/course-units/${byCode.CCS1101.id}`, { token, body: { name: 'Renamed' } })).status, 403);
+  });
+
+  test('people lists show only the people attached to the viewer', async () => {
+    const hod = await login('hod.cs@demo.edu');
+    const csUsers = (await api('GET', '/api/users', { token: hod })).data;
+    assert.ok(csUsers.length > 3 && csUsers.every((u) => u.department_name === 'Computer Science' || u.email === 'hod.cs@demo.edu'));
+    const itHod = q.get("SELECT id FROM users WHERE email = 'hod.it@demo.edu'");
+    assert.equal((await api('GET', `/api/users/${itHod.id}`, { token: hod })).status, 404);
+
+    const dean = await login('dean.fst@demo.edu');
+    const fst = (await api('GET', '/api/users', { token: dean })).data;
+    const deptNames = new Set(fst.map((u) => u.department_name).filter(Boolean));
+    assert.deepEqual([...deptNames].sort(), ['Computer Science', 'Information Technology']);
+    assert.deepEqual(codes((await api('GET', '/api/programs', { token: dean })).data), ['BIT', 'BSCS']);
+
+    const lecturer = await login('brian.kato@demo.edu');
+    const mine = (await api('GET', '/api/users', { token: lecturer })).data;
+    assert.ok(mine.every((u) => u.role === 'student' || u.email === 'brian.kato@demo.edu'), 'a lecturer sees only their own students');
+  });
+
+  test('the owning department plans a cross-cutting unit for every class; others see only their own classes', async () => {
+    const owner = (await api('GET', '/api/allocations/requirements', { token: await login('hod.ba@demo.edu') })).data;
+    const ccsForOwner = owner.units.find((u) => u.code === 'CCS1101');
+    assert.ok(ccsForOwner.classes.some((c) => c.program_code === 'BSCS') && ccsForOwner.classes.some((c) => c.program_code === 'BBA'));
+    const cs = (await api('GET', '/api/allocations/requirements', { token: await login('hod.cs@demo.edu') })).data;
+    const ccsForCs = cs.units.find((u) => u.code === 'CCS1101');
+    assert.ok(ccsForCs && ccsForCs.classes.every((c) => c.program_code === 'BSCS'));
+    assert.ok(!cs.units.some((u) => u.code === 'BIT1101'));
+  });
+
+  test('visitors can try any demo role without an account, and the demo accounts stay usable', async () => {
+    const info = (await api('GET', '/api/auth/demo')).data;
+    assert.equal(info.available, true);
+    assert.deepEqual(info.roles.map((r) => r.key), ['admin', 'dean', 'hod', 'lecturer', 'part_time', 'class_rep', 'student', 'hr']);
+    const s = await api('POST', '/api/auth/demo', { body: { role: 'hod' } });
+    assert.equal(s.status, 200);
+    assert.equal(s.data.user.email, 'hod.cs@demo.edu');
+    assert.equal(s.data.demo, true);
+    assert.equal((await api('POST', '/api/auth/demo', { body: { role: 'nope' } })).status, 400);
+    const change = await api('POST', '/api/auth/change-password', { token: s.data.token, body: { current_password: DEMO_PASSWORD, new_password: 'Something-new-1' } });
+    assert.equal(change.status, 403);
+    const rep = q.get("SELECT id FROM users WHERE email = 'rep.bscs1@students.demo.edu'");
+    const admin = await login('admin@demo.edu');
+    assert.equal((await api('PUT', `/api/users/${rep.id}`, { token: admin, body: { email: 'x@y.example' } })).status, 403);
+    assert.equal((await api('DELETE', `/api/users/${rep.id}`, { token: admin })).status, 403);
+  });
+});
+
+describe('Part-time pay claims', () => {
+  const claimOf = async (token, id) => (await api('GET', `/api/claims/${id}`, { token })).data;
+
+  test('the Dean sets the faculty rates; HoDs cannot, and lecturers see their own faculty only', async () => {
+    const dean = await login('dean.fst@demo.edu');
+    const fst = q.get("SELECT id FROM faculties WHERE code = 'FST'").id;
+    const fbm = q.get("SELECT id FROM faculties WHERE code = 'FBM'").id;
+    const created = await api('POST', '/api/claims/rates', { token: dean, body: { faculty_id: fst, name: 'Practical demonstration', unit: 'hour', amount: 20000 } });
+    assert.equal(created.status, 201);
+    assert.equal((await api('POST', '/api/claims/rates', { token: dean, body: { faculty_id: fbm, name: 'X', amount: 1 } })).status, 403);
+    assert.equal((await api('POST', '/api/claims/rates', { token: dean, body: { faculty_id: fst, kind: 'teaching', name: 'Teaching 2', amount: 1 } })).status, 400, 'one teaching rate per faculty');
+    assert.equal((await api('POST', '/api/claims/rates', { token: await login('hod.cs@demo.edu'), body: { faculty_id: fst, name: 'X', amount: 1 } })).status, 403);
+    const seen = (await api('GET', '/api/claims/rates', { token: await login('esther.atim@demo.edu') })).data;
+    assert.ok(seen.length > 0 && seen.every((r) => r.faculty_id === fst));
+  });
+
+  test('only part-time lecturers raise claims, built from attendance-approved lectures that are never claimed twice', async () => {
+    assert.equal((await api('POST', '/api/claims', { token: await login('brian.kato@demo.edu'), body: { period_start: '2026-01-01', period_end: '2026-01-31' } })).status, 403);
+    const esther = await login('esther.atim@demo.edu');
+    const today = zonedNow('Africa/Kampala').date;
+    const res = await api('POST', '/api/claims', { token: esther, body: { period_start: addDays(today, -30), period_end: today } });
+    assert.equal(res.status, 201);
+    const claim = await claimOf(esther, res.data.id);
+    const keys = claim.lines.filter((l) => l.kind === 'teaching').map((l) => `${l.session_id}@${l.work_date}`);
+    const claimedElsewhere = q.all("SELECT session_id || '@' || work_date AS k FROM pay_claim_lines WHERE kind = 'teaching' AND claim_id <> ?", claim.id).map((r) => r.k);
+    assert.ok(keys.every((k) => !claimedElsewhere.includes(k)), 'no lecture appears on two claims');
+    assert.ok(claim.lines.every((l) => l.students_total > 0 && l.students_present <= l.students_total));
+    assert.equal(claim.status, 'draft');
+
+    const marking = (await api('GET', '/api/claims/rates', { token: esther })).data.find((r) => r.name === 'Marking');
+    const added = await api('POST', `/api/claims/${claim.id}/lines`, { token: esther, body: { rate_id: marking.id, quantity: 30, work_date: today, description: 'CSC1103 quiz scripts' } });
+    assert.equal(added.status, 201);
+    assert.equal((await api('GET', `/api/claims/${claim.id}`, { token: await login('hod.cs@demo.edu') })).status, 404, 'drafts are private');
+    assert.equal((await api('DELETE', `/api/claims/${claim.id}`, { token: esther })).status, 200);
+  });
+
+  test('HoD, Dean and HR approve in turn, a returned claim can be resubmitted, and HR records the payment', async () => {
+    const id = q.get("SELECT pc.id FROM pay_claims pc JOIN users u ON u.id = pc.lecturer_id WHERE u.email = 'esther.atim@demo.edu' AND pc.status = 'submitted'").id;
+    const [esther, hod, dean, otherDean, hr] = await Promise.all(['esther.atim@demo.edu', 'hod.cs@demo.edu', 'dean.fst@demo.edu', 'dean.fbm@demo.edu', 'hr@demo.edu'].map(login));
+
+    assert.equal((await api('POST', `/api/claims/${id}/approve`, { token: dean })).status, 403, 'the Dean waits for the HoD');
+    const bare = await fetch(`${base}/api/claims/${id}/reject`, { method: 'POST', headers: { Authorization: `Bearer ${hod}` } });
+    assert.equal(bare.status, 400, 'actions posted without a body are validated, not a server error');
+    assert.equal((await api('POST', `/api/claims/${id}/reject`, { token: hod, body: {} })).status, 400, 'returning needs a reason');
+    assert.equal((await api('POST', `/api/claims/${id}/reject`, { token: hod, body: { note: 'Add the test date' } })).data.status, 'rejected');
+    assert.equal((await api('POST', `/api/claims/${id}/submit`, { token: esther })).data.status, 'submitted');
+
+    assert.equal((await api('POST', `/api/claims/${id}/approve`, { token: hod })).data.status, 'hod_approved');
+    assert.equal((await api('GET', `/api/claims/${id}`, { token: otherDean })).status, 404, 'other faculties cannot see it');
+    assert.equal((await api('POST', `/api/claims/${id}/approve`, { token: dean })).data.status, 'dean_approved');
+    assert.equal((await api('POST', `/api/claims/${id}/approve`, { token: hr })).data.status, 'hr_verified');
+    assert.equal((await api('POST', `/api/claims/${id}/approve`, { token: hr })).status, 400, 'payment needs a reference');
+    const paid = await api('POST', `/api/claims/${id}/approve`, { token: hr, body: { payment_reference: 'PV-TEST-1' } });
+    assert.equal(paid.data.status, 'paid');
+
+    const claim = await claimOf(esther, id);
+    assert.deepEqual(claim.events.map((e) => e.action), ['created', 'submitted', 'returned', 'resubmitted', 'approved', 'approved', 'verified', 'paid']);
+    assert.equal(claim.payment_reference, 'PV-TEST-1');
+    const line = claim.lines.find((l) => l.kind === 'teaching');
+    const att = (await api('GET', `/api/claims/${id}/lines/${line.id}/attendance`, { token: hr })).data;
+    assert.ok(att.registers.length > 0 && att.registers[0].students.length > 0, 'approvers can see who attended');
+    assert.ok(q.get("SELECT COUNT(*) AS n FROM notifications WHERE user_id = (SELECT id FROM users WHERE email = 'esther.atim@demo.edu') AND title = 'Claim paid'").n >= 1);
+  });
+
+  test('HR exports the payment schedule and sees claims awaiting them on the dashboard', async () => {
+    const hr = await login('hr@demo.edu');
+    const xlsx = await api('GET', '/api/claims/export?status=dean_approved,hr_verified,paid', { token: hr });
+    assert.equal(xlsx.status, 200);
+    assert.ok(xlsx.type.includes('spreadsheetml'));
+    const dash = (await api('GET', '/api/dashboard', { token: hr })).data;
+    assert.ok(dash.claims.awaiting_me >= 1);
+    assert.equal((await api('GET', '/api/users', { token: hr })).status, 403, 'HR only handles claims');
   });
 });

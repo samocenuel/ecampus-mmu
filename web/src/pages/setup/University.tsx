@@ -88,6 +88,9 @@ export default function UniversitySettings() {
             <Field label="Timezone">
               <Input {...set('timezone')} />
             </Field>
+            <Field label="Currency" help="3-letter code used for part-time pay, e.g. UGX, KES, USD.">
+              <Input maxLength={3} {...set('currency')} />
+            </Field>
             <Field label="Physical address" span={2}>
               <Input {...set('address')} />
             </Field>

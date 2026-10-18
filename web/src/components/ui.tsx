@@ -3,6 +3,9 @@ import { ChevronDown, ChevronUp, Inbox, Loader2, Search, X } from 'lucide-react'
 
 const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(' ');
 
+/** "1 register", "3 registers"; pass the plural for irregular words. */
+export const plural = (n: number, word: string, many = `${word}s`) => `${n} ${n === 1 ? word : many}`;
+
 type Variant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'success';
 
 export function Button({

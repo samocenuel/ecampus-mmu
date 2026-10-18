@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
 import '../../core/app_state.dart';
@@ -85,12 +86,16 @@ final courseUnitsSpec = RSpec(
   endpoint: '/api/course-units',
   intro: 'Cross-cutting units are shared across programmes and must be created and allocated first.',
   titleOf: (r) => '${r['code']} · ${r['name']}',
-  subtitleOf: (r) =>
-      '${r['credit_units']} CU · ${r['hours_per_week']} hrs/wk · ${(r['programs'] as List).isEmpty ? 'not linked' : (r['programs'] as List).map((p) => '${p['code']} Y${p['year_of_study']}S${p['semester']}').join(', ')}',
+  subtitleOf: (r) => [
+        '${r['credit_units']} CU · ${r['hours_per_week']} hrs/wk · ${(r['programs'] as List).isEmpty ? 'not linked' : (r['programs'] as List).map((p) => '${p['code']} Y${p['year_of_study']}S${p['semester']}').join(', ')}',
+        if (r['sharing'] == 'in') 'Shared in from ${r['department_name'] ?? 'another department'}',
+        if (r['sharing'] == 'out' && r['can_manage'] == true) 'Shared out to other departments',
+      ].join('\n'),
   badgeOf: (r) => r['is_cross_cutting'] == 1 ? 'CROSS-CUTTING' : null,
   canCreate: _managers,
   canEdit: _managers,
   canDelete: _managers,
+  rowEditable: (r) => r['can_manage'] != false,
   refs: {
     'departments': RefSpec('/api/departments', (r) => '${r['name']}'),
     'programs': RefSpec('/api/programs', (r) => '${r['code']}'),
@@ -246,20 +251,20 @@ Future<void> _appointRep(BuildContext context, Map cls, Future<void> Function() 
 }
 
 const _creatable = {
-  'admin': ['admin', 'dean', 'hod', 'lecturer', 'student'],
+  'admin': ['admin', 'hr', 'dean', 'hod', 'lecturer', 'student'],
   'dean': ['hod', 'lecturer', 'student'],
   'hod': ['lecturer', 'student'],
 };
 
 RSpec usersSpec(AppState app, String group) {
-  final roles = {'staff': 'lecturer,hod,dean', 'students': 'student', 'admins': 'admin'}[group]!;
+  final roles = {'staff': 'lecturer,hod,dean', 'students': 'student', 'admins': 'admin,hr'}[group]!;
   final allowed = (_creatable[app.role] ?? const []).where((r) => roles.split(',').contains(r)).toList();
   return RSpec(
-    title: group == 'students' ? 'Students' : group == 'admins' ? 'Administrators' : 'Lecturers & leaders',
-    noun: group == 'students' ? 'Student' : group == 'admins' ? 'Administrator' : 'Staff member',
+    title: group == 'students' ? 'Students' : group == 'admins' ? 'Administrators & HR' : 'Lecturers & leaders',
+    noun: group == 'students' ? 'Student' : group == 'admins' ? 'Account' : 'Staff member',
     endpoint: '/api/users',
     query: '?roles=$roles',
-    titleOf: (r) => '${_person(r)}${r['is_class_rep'] == 1 ? '  ★ class rep' : ''}',
+    titleOf: (r) => '${_person(r)}${r['is_class_rep'] == 1 ? '  ★ class rep' : ''}${r['employment_type'] == 'part_time' ? ' · part-time' : ''}',
     subtitleOf: (r) => '${roleLabels[r['role']]} · ${r['email']} · ${r['class_name'] ?? r['department_name'] ?? r['faculty_name'] ?? '-'}${r['active'] == 1 ? '' : ' · inactive'}',
     canCreate: (_) => allowed.isNotEmpty,
     canEdit: (_) => allowed.isNotEmpty,
@@ -276,18 +281,20 @@ RSpec usersSpec(AppState app, String group) {
       const FSpec('email', 'Email', type: FType.email, required: true),
       const FSpec('phone', 'Phone'),
       FSpec('identifier', group == 'students' ? 'Registration number' : 'Staff number'),
+      FSpec('employment_type', 'Employment', type: FType.select, defaultValue: 'full_time', options: const [('full_time', 'Full-time'), ('part_time', 'Part-time (paid per hour and task)')], showIf: (f) => const ['lecturer', 'hod', 'dean'].contains(f['role'])),
       FSpec('faculty_id', 'Faculty', type: FType.select, ref: 'faculties', showIf: (f) => f['role'] == 'dean'),
       FSpec('department_id', 'Department', type: FType.select, ref: 'departments', showIf: (f) => f['role'] == 'hod' || f['role'] == 'lecturer'),
       FSpec('class_id', 'Class', type: FType.select, ref: 'classes', required: true, showIf: (f) => f['role'] == 'student'),
       const FSpec('password', 'Password (blank = generate temporary)', type: FType.password),
     ],
-    fromRow: (r) => {for (final k in ['role', 'title', 'name', 'email', 'phone', 'identifier', 'faculty_id', 'department_id', 'class_id']) k: r[k]},
+    fromRow: (r) => {for (final k in ['role', 'employment_type', 'title', 'name', 'email', 'phone', 'identifier', 'faculty_id', 'department_id', 'class_id']) k: r[k]},
     toPayload: (f, creating) {
       final body = Map<String, dynamic>.from(f);
       for (final k in ['faculty_id', 'department_id', 'class_id']) {
         if (body[k] == '') body[k] = null;
       }
       if ((body['password'] ?? '') == '') body.remove('password');
+      if (!const ['lecturer', 'hod', 'dean'].contains(body['role'])) body.remove('employment_type');
       return body;
     },
     onCreated: (context, result) async {
@@ -311,3 +318,27 @@ RSpec usersSpec(AppState app, String group) {
     },
   );
 }
+
+/// Part-time pay rates: the Dean sets a teaching rate per hour and task rates (marking, supervision...).
+final payRatesSpec = RSpec(
+  title: 'Pay rates',
+  noun: 'Rate',
+  endpoint: '/api/claims/rates',
+  intro: 'Rates used for part-time claims. Teaching is paid per contact hour; tasks per script, student, visit...',
+  titleOf: (r) => '${r['name']} · ${NumberFormat('#,##0.##').format(r['amount'])} per ${r['unit']}',
+  subtitleOf: (r) => '${r['faculty_name']}${r['description'] != null ? ' · ${r['description']}' : ''}',
+  badgeOf: (r) => r['kind'] == 'teaching' ? 'TEACHING' : null,
+  canCreate: _adminOrDean,
+  canEdit: _adminOrDean,
+  canDelete: _adminOrDean,
+  refs: {'faculties': RefSpec('/api/faculties', (r) => '${r['name']}')},
+  fields: [
+    const FSpec('faculty_id', 'Faculty', type: FType.select, ref: 'faculties', required: true),
+    FSpec('kind', 'Type', type: FType.select, defaultValue: 'task', options: const [('task', 'Task (marking, supervision...)'), ('teaching', 'Teaching per hour')], showIf: (f) => f['id'] == null),
+    const FSpec('name', 'Name', required: true),
+    FSpec('unit', 'Paid per', type: FType.select, defaultValue: 'script', options: const [('hour', 'hour'), ('script', 'script'), ('student', 'student'), ('visit', 'visit'), ('day', 'day'), ('item', 'item')], showIf: (f) => f['kind'] != 'teaching'),
+    const FSpec('amount', 'Unit price', type: FType.number, required: true),
+    const FSpec('description', 'Notes'),
+  ],
+  fromRow: (r) => {'id': r['id'], 'faculty_id': r['faculty_id'], 'kind': r['kind'], 'name': r['name'], 'unit': r['unit'], 'amount': r['amount'], 'description': r['description']},
+);

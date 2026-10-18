@@ -6,15 +6,16 @@ import '../core/app_state.dart';
 import '../widgets/common.dart';
 import 'register_screen.dart';
 
-const _demoAccounts = [
-  ('Administrator', 'admin@demo.edu'),
-  ('Dean', 'dean.fst@demo.edu'),
-  ('Head of Dept', 'hod.cs@demo.edu'),
-  ('Lecturer', 'brian.kato@demo.edu'),
-  ('Class rep', 'rep.bscs1@students.demo.edu'),
-  ('Student', 'student.bscs1@students.demo.edu'),
-];
-const _demoPassword = 'Passw0rd!';
+const _roleIcons = {
+  'admin': Icons.account_balance_outlined,
+  'dean': Icons.domain_outlined,
+  'hod': Icons.account_tree_outlined,
+  'lecturer': Icons.menu_book_outlined,
+  'class_rep': Icons.fact_check_outlined,
+  'student': Icons.person_outline,
+  'part_time': Icons.work_history_outlined,
+  'hr': Icons.badge_outlined,
+};
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -26,24 +27,23 @@ class LoginScreen extends StatefulWidget {
 class _LoginScreenState extends State<LoginScreen> {
   final _email = TextEditingController();
   final _password = TextEditingController();
-  late final TextEditingController _server;
   bool _busy = false;
-  bool _demo = false;
   bool _hide = true;
+  List<Map<String, dynamic>> _demoRoles = const [];
 
   @override
   void initState() {
     super.initState();
-    _server = TextEditingController(text: context.read<AppState>().api.baseUrl);
-    _checkServer();
+    _loadDemo();
   }
 
-  Future<void> _checkServer() async {
+  Future<void> _loadDemo() async {
     try {
-      final health = await context.read<AppState>().api.get('/api/health');
-      if (mounted) setState(() => _demo = health['demo'] == true);
+      final demo = await context.read<AppState>().api.get('/api/auth/demo');
+      final roles = demo['available'] == true ? (demo['roles'] as List).cast<Map<String, dynamic>>() : <Map<String, dynamic>>[];
+      if (mounted) setState(() => _demoRoles = roles);
     } catch (_) {
-      if (mounted) setState(() => _demo = false);
+      if (mounted) setState(() => _demoRoles = const []);
     }
   }
 
@@ -56,6 +56,75 @@ class _LoginScreenState extends State<LoginScreen> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  Future<void> _openDemo() async {
+    final app = context.read<AppState>();
+    final role = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (sheet) => SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            Text('Try the demo', style: Theme.of(sheet).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700)),
+            const SizedBox(height: 4),
+            Text('Explore Demo University with sample timetables and attendance. Choose a role.',
+                style: TextStyle(color: Theme.of(sheet).colorScheme.onSurfaceVariant)),
+            const SizedBox(height: 12),
+            for (final r in _demoRoles)
+              Card(
+                margin: const EdgeInsets.only(bottom: 8),
+                child: ListTile(
+                  leading: CircleAvatar(
+                    backgroundColor: Theme.of(sheet).colorScheme.primaryContainer,
+                    child: Icon(_roleIcons[r['key']] ?? Icons.person_outline, color: Theme.of(sheet).colorScheme.onPrimaryContainer),
+                  ),
+                  title: Text(r['label'] as String, style: const TextStyle(fontWeight: FontWeight.w600)),
+                  subtitle: Text(r['description'] as String? ?? ''),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => Navigator.of(sheet).pop(r['key'] as String),
+                ),
+              ),
+          ]),
+        ),
+      ),
+    );
+    if (role == null || !mounted) return;
+    setState(() => _busy = true);
+    try {
+      await app.loginDemo(role);
+    } catch (e) {
+      if (mounted) showError(context, e);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _editServer() async {
+    final app = context.read<AppState>();
+    final controller = TextEditingController(text: app.api.baseUrl);
+    final url = await showDialog<String>(
+      context: context,
+      builder: (dialog) => AlertDialog(
+        title: const Text('Server'),
+        content: TextField(
+          controller: controller,
+          keyboardType: TextInputType.url,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'Server address', hintText: 'https://www.studio13developers.com/ecampus'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(dialog).pop(), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.of(dialog).pop(controller.text), child: const Text('Save')),
+        ],
+      ),
+    );
+    if (url == null || url.trim().isEmpty) return;
+    await app.setServerUrl(url);
+    await _loadDemo();
+    if (mounted) showMessage(context, 'Server address saved');
   }
 
   @override
@@ -77,12 +146,12 @@ class _LoginScreenState extends State<LoginScreen> {
                       child: Icon(Icons.school_rounded, color: scheme.onPrimary, size: 28),
                     ),
                     const SizedBox(width: 12),
-                    Expanded(child: Text('eCampus MMU', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700))),
+                    Expanded(child: Text('eCampus', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700))),
                   ]),
                   const SizedBox(height: 28),
                   Text('Sign in', style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w700)),
                   const SizedBox(height: 4),
-                  Text('Timetables, attendance and reminders for your university.', style: TextStyle(color: scheme.onSurfaceVariant)),
+                  Text('Use the account your university administrator created for you.', style: TextStyle(color: scheme.onSurfaceVariant)),
                   const SizedBox(height: 20),
                   TextField(
                     controller: _email,
@@ -113,61 +182,32 @@ class _LoginScreenState extends State<LoginScreen> {
                     onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const RegisterScreen())),
                     child: const Text('New institution? Create your university'),
                   ),
-                  TextButton(
-                    onPressed: () => launchUrl(Uri.parse('${context.read<AppState>().api.baseUrl}/privacy'), mode: LaunchMode.externalApplication),
-                    child: Text('Privacy policy', style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 12.5)),
-                  ),
-                  const SizedBox(height: 8),
-                  ExpansionTile(
-                    tilePadding: EdgeInsets.zero,
-                    leading: const Icon(Icons.dns_outlined),
-                    title: const Text('Server'),
-                    subtitle: Text(context.watch<AppState>().api.baseUrl, style: const TextStyle(fontSize: 12)),
-                    children: [
-                      Row(children: [
-                        Expanded(
-                          child: TextField(
-                            controller: _server,
-                            keyboardType: TextInputType.url,
-                            decoration: const InputDecoration(labelText: 'API address', hintText: 'http://192.168.1.10:4000'),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        FilledButton.tonal(
-                          onPressed: () async {
-                            await context.read<AppState>().setServerUrl(_server.text);
-                            await _checkServer();
-                            if (context.mounted) showMessage(context, _demo ? 'Connected (demo data available)' : 'Server address saved');
-                          },
-                          child: const Text('Save'),
-                        ),
-                      ]),
-                      const SizedBox(height: 8),
-                    ],
-                  ),
-                  if (_demo) ...[
+                  if (_demoRoles.isNotEmpty) ...[
                     const SizedBox(height: 8),
-                    Card(
-                      child: Padding(
-                        padding: const EdgeInsets.all(14),
-                        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                          const Text('Demo accounts', style: TextStyle(fontWeight: FontWeight.w600)),
-                          Text('Password for all: $_demoPassword', style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 12)),
-                          const SizedBox(height: 10),
-                          Wrap(spacing: 8, runSpacing: 8, children: [
-                            for (final (label, email) in _demoAccounts)
-                              ActionChip(
-                                label: Text(label),
-                                onPressed: () => setState(() {
-                                  _email.text = email;
-                                  _password.text = _demoPassword;
-                                }),
-                              ),
-                          ]),
-                        ]),
-                      ),
+                    Row(children: [
+                      const Expanded(child: Divider()),
+                      Padding(padding: const EdgeInsets.symmetric(horizontal: 12), child: Text('OR', style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 12))),
+                      const Expanded(child: Divider()),
+                    ]),
+                    const SizedBox(height: 8),
+                    OutlinedButton.icon(
+                      onPressed: _busy ? null : _openDemo,
+                      icon: const Icon(Icons.play_circle_outline),
+                      label: const Padding(padding: EdgeInsets.symmetric(vertical: 12), child: Text('Try the demo (no account needed)')),
                     ),
                   ],
+                  const SizedBox(height: 24),
+                  Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                    TextButton(
+                      onPressed: () => launchUrl(Uri.parse('${context.read<AppState>().api.baseUrl}/privacy'), mode: LaunchMode.externalApplication),
+                      child: Text('Privacy policy', style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 12.5)),
+                    ),
+                    Text('·', style: TextStyle(color: scheme.onSurfaceVariant)),
+                    TextButton(
+                      onPressed: _editServer,
+                      child: Text('Server settings', style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 12.5)),
+                    ),
+                  ]),
                 ]),
               ),
             ),

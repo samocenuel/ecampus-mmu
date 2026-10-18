@@ -2,7 +2,7 @@
 import { Link } from 'react-router-dom';
 import { useAuth } from '../../auth';
 import { ResourcePage } from '../../components/ResourcePage';
-import { Badge } from '../../components/ui';
+import { Badge, plural } from '../../components/ui';
 import { useFetch } from '../../hooks';
 
 const leader = (name?: string | null, email?: string | null) =>
@@ -33,7 +33,7 @@ export function Faculties() {
       canCreate={isAdmin}
       canEdit={() => isAdmin}
       canDelete={() => isAdmin}
-      deleteMessage={(f: any) => `Deleting ${f.name} also deletes its ${f.department_count} department(s), their programmes and classes.`}
+      deleteMessage={(f: any) => `Deleting ${f.name} also deletes its ${plural(f.department_count, 'department')}, their programmes and classes.`}
       columns={[
         { key: 'name', header: 'Faculty', render: (f: any) => <strong>{f.name}</strong> },
         { key: 'code', header: 'Code', width: '90px' },
@@ -51,24 +51,29 @@ export function Faculties() {
 }
 
 export function Departments() {
-  const { hasRole } = useAuth();
+  const { hasRole, user } = useAuth();
+  const isDean = user?.role === 'dean';
   const { data: faculties } = useFetch<any[]>('/api/faculties');
   const { data: hods } = useFetch<any[]>('/api/users?role=hod&active=1');
   const canManage = hasRole('admin', 'dean');
   return (
     <ResourcePage
       title="Departments"
-      subtitle="Departments belong to a faculty and are managed by a Head of Department (HoD)."
+      subtitle={
+        isDean
+          ? `The departments of ${user?.faculty_name || 'your faculty'}, each run by a Head of Department (HoD).`
+          : 'Departments belong to a faculty and are managed by a Head of Department (HoD).'
+      }
       noun="Department"
       endpoint="/api/departments"
       searchKeys={['name', 'code', 'faculty_name', 'hod_name']}
       canCreate={canManage}
       canEdit={() => canManage}
       canDelete={() => canManage}
-      deleteMessage={(d: any) => `Deleting ${d.name} also deletes its ${d.program_count} programme(s) and their classes.`}
+      deleteMessage={(d: any) => `Deleting ${d.name} also deletes its ${plural(d.program_count, 'programme')} and their classes.`}
       columns={[
         { key: 'name', header: 'Department', render: (d: any) => <><strong>{d.name}</strong>{d.code && <span className="muted"> · {d.code}</span>}</> },
-        { key: 'faculty_name', header: 'Faculty', hideOnMobile: true },
+        ...(isDean ? [] : [{ key: 'faculty_name', header: 'Faculty', hideOnMobile: true }]),
         { key: 'hod_name', header: 'Head of Department', render: (d: any) => leader(d.hod_name, d.hod_email) },
         { key: 'program_count', header: 'Programmes', align: 'right', hideOnMobile: true },
         { key: 'lecturer_count', header: 'Lecturers', align: 'right', hideOnMobile: true },
