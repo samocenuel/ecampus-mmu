@@ -60,3 +60,18 @@ jobs:
         with:
           name: android-apk
           path: mobile/build/app/outputs/flutter-apk/app-release.apk
+
+  ios:
+    # Unsigned build to catch iOS compile problems; signed uploads use ios.yml.
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter build ios --release --no-codesign
