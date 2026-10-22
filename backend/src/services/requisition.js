@@ -21,7 +21,7 @@ export function ensureVerifyCode(claimId) {
   if (existing) return existing;
   for (;;) {
     const code = newCode();
-    if (!q.get('SELECT 1 FROM pay_claims WHERE verify_code = ?', code)) {
+    if (!q.get('SELECT 1 FROM pay_claims WHERE verify_code = ?', code) && !q.get('SELECT 1 FROM research_projects WHERE verify_code = ?', code)) {
       q.run('UPDATE pay_claims SET verify_code = ? WHERE id = ?', code, claimId);
       return code;
     }

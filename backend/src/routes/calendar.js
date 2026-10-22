@@ -5,6 +5,8 @@ import { loadUser } from '../auth.js';
 import { q } from '../db.js';
 import { examsForUser } from '../services/exams.js';
 import { localToUtc, occurrencesForUser } from '../services/occurrences.js';
+import { KIND_LABEL, researchEventsFor } from '../services/research.js';
+import { notificationPrefs } from '../services/schedule.js';
 import { addDays, zonedNow } from '../util.js';
 
 const router = Router();
@@ -39,6 +41,8 @@ export function buildIcs(name, events) {
       `SUMMARY:${esc(e.summary)}`,
       ...(e.location ? [`LOCATION:${esc(e.location)}`] : []),
       ...(e.description ? [`DESCRIPTION:${esc(e.description)}`] : []),
+      // Reminders, for calendar apps that honour them in subscribed calendars.
+      ...(e.alarms || []).flatMap((minutes) => ['BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${esc(e.summary)}`, `TRIGGER:-PT${minutes}M`, 'END:VALARM']),
       'END:VEVENT',
     );
   }
@@ -74,6 +78,20 @@ export function feedFor(user) {
       summary: `${e.duty ? 'Invigilate: ' : 'Exam: '}${e.course_code} ${e.course_name}`,
       location: e.rooms.map((r) => r.name).join(', '),
       description: e.duty ? `Room: ${e.duty_room || e.rooms.map((r) => r.name).join(', ')}` : 'Bring your student ID.',
+    });
+  }
+  const prefs = notificationPrefs(user.id);
+  const alarms = prefs.research_enabled ? [prefs.research_day_before ? 1440 : null, prefs.research_minutes_before].filter(Boolean) : [];
+  for (const e of researchEventsFor(user, from, to)) {
+    const start = localToUtc(e.at.slice(0, 10), e.at.slice(11, 16) || '09:00', tz);
+    events.push({
+      uid: `research-${e.type}-${e.project.id}@ecampus`,
+      start,
+      end: new Date(start.getTime() + e.minutes * 60000),
+      summary: `${e.title}`,
+      location: e.venue || '',
+      description: [`${KIND_LABEL[e.project.kind]}: ${e.project.title}`, e.panel ? `Panel: ${e.panel}` : null].filter(Boolean).join('\n'),
+      alarms,
     });
   }
   return buildIcs(`${uni?.short_name || uni?.name || 'eCampus'} timetable`, events);

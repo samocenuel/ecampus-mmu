@@ -37,13 +37,19 @@ class _LoginScreenState extends State<LoginScreen> {
     _loadDemo();
   }
 
-  Future<void> _loadDemo() async {
+  /// "Try the demo" appears once the demo list loads; retried so a slow or restarting server doesn't hide it.
+  Future<void> _loadDemo([int attempt = 1]) async {
     try {
       final demo = await context.read<AppState>().api.get('/api/auth/demo');
       final roles = demo['available'] == true ? (demo['roles'] as List).cast<Map<String, dynamic>>() : <Map<String, dynamic>>[];
       if (mounted) setState(() => _demoRoles = roles);
     } catch (_) {
-      if (mounted) setState(() => _demoRoles = const []);
+      if (!mounted) return;
+      setState(() => _demoRoles = const []);
+      if (attempt < 5) {
+        await Future<void>.delayed(Duration(seconds: 2 * attempt));
+        if (mounted) _loadDemo(attempt + 1);
+      }
     }
   }
 

@@ -47,6 +47,7 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
           final prefs = data[1] as Map<String, dynamic>;
           return ListView(padding: const EdgeInsets.all(12), children: [
             if (app.isStudent || app.teaches) _ReminderSettings(prefs: prefs, onChanged: reload),
+            if (app.isStudent || app.teaches || app.isManager) _ResearchReminderSettings(prefs: prefs, onChanged: reload),
             const SizedBox(height: 4),
             if (items.isEmpty) const EmptyView(icon: Icons.notifications_none, title: 'No notifications yet'),
             for (final n in items)
@@ -134,6 +135,62 @@ class _ReminderSettings extends StatelessWidget {
               if (context.mounted) showMessage(context, 'Test sent');
             },
           ),
+        ),
+      ]),
+    );
+  }
+}
+
+const _researchLead = [15, 30, 60, 120, 180, 360, 720];
+
+/// Reminders for concept presentations and defences the user takes part in.
+class _ResearchReminderSettings extends StatelessWidget {
+  const _ResearchReminderSettings({required this.prefs, required this.onChanged});
+  final Map<String, dynamic> prefs;
+  final Future<void> Function() onChanged;
+
+  Future<void> _save(BuildContext context, Map<String, dynamic> patch) async {
+    final app = context.read<AppState>();
+    try {
+      await app.api.put('/api/notifications/preferences', {...prefs, ...patch});
+      final scheduled = await app.syncReminders();
+      if (context.mounted) {
+        showMessage(context, NotificationService.instance.supported ? 'Saved - $scheduled reminder(s) scheduled on this phone' : 'Reminder settings saved');
+      }
+      await onChanged();
+    } catch (e) {
+      if (context.mounted) showError(context, e);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = prefs['research_enabled'] != false;
+    final minutes = (prefs['research_minutes_before'] as num?)?.toInt() ?? 60;
+    return SectionCard(
+      title: 'Presentations and defences',
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text('Remind me before research presentations and defences'),
+          subtitle: const Text('Ones you present, supervise, coordinate or approve'),
+          value: enabled,
+          onChanged: (v) async {
+            if (v) await NotificationService.instance.requestPermission();
+            if (context.mounted) await _save(context, {'research_enabled': v});
+          },
+        ),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text('Also remind me the day before'),
+          value: prefs['research_day_before'] != false,
+          onChanged: enabled ? (v) => _save(context, {'research_day_before': v}) : null,
+        ),
+        DropdownButtonFormField<int>(
+          initialValue: _researchLead.contains(minutes) ? minutes : 60,
+          decoration: const InputDecoration(labelText: 'Remind me'),
+          items: [for (final m in _researchLead) DropdownMenuItem(value: m, child: Text(m < 60 ? '$m minutes before' : '${m ~/ 60} hour${m > 60 ? 's' : ''} before'))],
+          onChanged: enabled ? (v) => _save(context, {'research_minutes_before': v}) : null,
         ),
       ]),
     );

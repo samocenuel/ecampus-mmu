@@ -67,6 +67,7 @@ export default function Register() {
   const next = (e: FormEvent) => {
     e.preventDefault();
     setError(null);
+    if (step === 1 && !logo) return setError("Upload your institution's logo: it appears on timetables, requisitions and the app");
     if (step === 1 && logo && logo.size > 2 * 1024 * 1024) return setError('The logo must be smaller than 2 MB');
     if (step === 1 && !/^#[0-9a-f]{6}$/i.test(uni.primary_color)) return setError('Enter a colour like #1E5AA8');
     if (step < 2) return setStep(step + 1);
@@ -86,7 +87,9 @@ export default function Register() {
         try {
           setUniversity(await api('/api/university/logo', { method: 'POST', form }));
         } catch {
-          /* the university exists; the logo can be uploaded again from settings */
+          // The university exists; send the administrator to upload the logo again.
+          navigate('/setup/university', { replace: true });
+          return;
         }
       }
       navigate('/', { replace: true });
@@ -151,7 +154,7 @@ export default function Register() {
           {step === 1 && (
             <div className="branding">
               <div>
-                <Field label="Logo">
+                <Field label="Institution logo *" help="Shown on the sign-in screen, timetables, exports, requisition forms and the app.">
                   <LogoPicker preview={preview} onFile={setLogo} />
                 </Field>
                 <Field label="Primary theme colour">

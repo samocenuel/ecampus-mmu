@@ -35,6 +35,8 @@ export const config = {
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '7d',
   dbFile,
   uploadDir: process.env.UPLOAD_DIR || path.join(root, 'uploads'),
+  // Files that must not be public (research documents) live beside the database, which deploys keep.
+  privateDir: process.env.PRIVATE_DIR || (dbFile === ':memory:' ? path.join(process.env.UPLOAD_DIR || path.join(root, 'uploads'), '.private') : path.join(path.dirname(dbFile), 'private')),
   webDist: process.env.WEB_DIST || path.join(root, '..', 'web', 'dist'),
   // Flutter web build of the mobile app (flutter build web --base-href /m/), served at /m/.
   mobileWebDist: process.env.MOBILE_WEB_DIST || path.join(root, '..', 'mobile', 'build', 'web'),

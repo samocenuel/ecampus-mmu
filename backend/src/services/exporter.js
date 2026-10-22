@@ -1103,3 +1103,111 @@ export function requisitionPdf(university, claim, lines, { lecturer, vote, voteB
     }
   });
 }
+
+/**
+ * Research clearance certificate: the student, the work, supervisors, every sign-off as a digital
+ * footprint, and a QR code (student, work, status and a link) to check it against the system.
+ */
+export function researchCertificatePdf(university, project, { supervisors, signOffs, verify }) {
+  const primary = `#${hex(university.primary_color)}`;
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: 'A4', margin: 44, bufferPages: true });
+    const chunks = [];
+    doc.on('data', (c) => chunks.push(c));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+    try {
+      const left = doc.page.margins.left;
+      const width = doc.page.width - left - doc.page.margins.right;
+      let y = doc.page.margins.top;
+      const qrSize = 92;
+      const logo = logoFile(university);
+      if (logo) {
+        try {
+          doc.image(logo, left, y, { fit: [70, 70] });
+        } catch {
+          /* unreadable logo */
+        }
+      }
+      drawQr(doc, verify.qrText, left + width - qrSize, y - 4, qrSize);
+      doc.font('Helvetica').fontSize(6.5).fillColor('#667085').text(`Scan to verify · ${verify.code}`, left + width - qrSize - 10, y + qrSize - 2, { width: qrSize + 10, align: 'center', lineBreak: false });
+      doc.font('Helvetica-Bold').fontSize(16).fillColor(primary).text(university.name, left + 80, y + 4, { width: width - 80 - qrSize - 12, align: 'center' });
+      const contact = [university.address, university.phone ? `Tel. ${university.phone}` : null, university.email].filter(Boolean).join(' · ');
+      doc.font('Helvetica').fontSize(8.5).fillColor('#475467').text(contact, left + 80, doc.y + 2, { width: width - 80 - qrSize - 12, align: 'center' });
+      y = Math.max(doc.y, y + qrSize + 10) + 8;
+      doc.moveTo(left, y).lineTo(left + width, y).lineWidth(1.5).strokeColor(primary).stroke();
+      y += 22;
+
+      doc.font('Helvetica-Bold').fontSize(18).fillColor('#101828').text('Research Clearance Certificate', left, y, { width, align: 'center' });
+      y = doc.y + 4;
+      doc.font('Helvetica').fontSize(9.5).fillColor('#475467').text(`${project.kind_label} · certificate #${project.id} · verification code ${verify.code}`, left, y, { width, align: 'center' });
+      y = doc.y + 20;
+
+      doc.font('Helvetica').fontSize(11).fillColor('#101828').text('This is to certify that', left, y, { width, align: 'center' });
+      y = doc.y + 6;
+      doc.font('Helvetica-Bold').fontSize(15).text(`${project.student_name}${project.student_identifier ? ` (${project.student_identifier})` : ''}`, left, y, { width, align: 'center' });
+      y = doc.y + 6;
+      doc.font('Helvetica').fontSize(11).text(`of ${project.program_name || project.program_code || ''}, ${project.department_name || ''}, has completed and defended the ${project.kind_label.toLowerCase()} entitled`, left, y, { width, align: 'center' });
+      y = doc.y + 8;
+      doc.font('Helvetica-BoldOblique').fontSize(13).fillColor(primary).text(`"${project.title}"`, left + 20, y, { width: width - 40, align: 'center' });
+      y = doc.y + 8;
+      doc.font('Helvetica').fontSize(11).fillColor('#101828').text(`and has been approved and cleared${project.cleared_at ? ` on ${localStamp(university, project.cleared_at).slice(0, 10)}` : ''}.`, left, y, { width, align: 'center' });
+      y = doc.y + 18;
+
+      const info = [
+        ['Supervisors', supervisors.map((s) => `${[s.title, s.name].filter(Boolean).join(' ')}${s.role === 'co' ? ' (co-supervisor)' : ''}`).join(', ') || '-'],
+        ['Defence', [project.defence_at, project.defence_venue].filter(Boolean).join(', ') || '-'],
+        ['Panel', project.defence_panel || '-'],
+      ];
+      doc.fontSize(9.5);
+      for (const [k, v] of info) {
+        doc.font('Helvetica').fillColor('#475467').text(k, left, y, { width: 90 });
+        doc.font('Helvetica-Bold').fillColor('#101828').text(v, left + 92, y, { width: width - 92 });
+        y = doc.y + 5;
+      }
+      y += 8;
+
+      doc.font('Helvetica-Bold').fontSize(10.5).fillColor(primary).text('Digital signatures', left, y);
+      y = doc.y + 6;
+      const cols = [['Sign-off', 215], ['Name', 130], ['Date', 82], ['Digital signature', width - 427]];
+      doc.rect(left, y, width, 16).fill(primary);
+      let cx = left;
+      doc.font('Helvetica-Bold').fontSize(8.5).fillColor('#FFFFFF');
+      for (const [h, w] of cols) {
+        doc.text(h, cx + 4, y + 4, { width: w - 8, lineBreak: false });
+        cx += w;
+      }
+      y += 18;
+      signOffs.forEach((s, i) => {
+        if (i % 2) doc.rect(left, y - 2, width, 15).fill('#F9FAFB');
+        const cells = [s.label, s.name || 'Not recorded', s.at ? localStamp(university, s.at).slice(0, 10) : '', s.footprint || ''];
+        cx = left;
+        cells.forEach((c, ci) => {
+          doc.font(ci === 3 ? 'Courier-Bold' : 'Helvetica').fontSize(ci === 3 ? 8.5 : 8).fillColor(ci === 3 ? '#067647' : s.name ? '#101828' : '#98A2B3');
+          doc.text(c, cx + 4, y + 1, { width: cols[ci][1] - 8, lineBreak: false, ellipsis: true });
+          cx += cols[ci][1];
+        });
+        y += 15;
+      });
+      y += 12;
+      doc.font('Helvetica').fontSize(7.5).fillColor('#475467').text(
+        `Digital signatures are eCampus sign-off footprints: each records who signed, in which role and when. Check this certificate, its status and every footprint at ${verify.url} (code ${verify.code}).`,
+        left,
+        y,
+        { width },
+      );
+
+      const range = doc.bufferedPageRange();
+      for (let i = range.start; i < range.start + range.count; i++) {
+        doc.switchToPage(i);
+        const keep = doc.page.margins.bottom;
+        doc.page.margins.bottom = 0;
+        doc.font('Helvetica').fontSize(7.5).fillColor('#98A2B3').text(`${university.short_name || university.name} · research clearance #${project.id} · verify code ${verify.code} · generated ${localStamp(university)}`, left, doc.page.height - 28, { width, align: 'center', lineBreak: false });
+        doc.page.margins.bottom = keep;
+      }
+      doc.end();
+    } catch (err) {
+      reject(err);
+    }
+  });
+}

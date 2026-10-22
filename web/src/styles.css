@@ -643,6 +643,8 @@ select.input { padding-right: 28px; }
 .footprints li.missing { opacity: 0.6; }
 .footprints code { font-family: ui-monospace, Consolas, monospace; font-weight: 700; color: #067647; letter-spacing: 0.04em; white-space: nowrap; }
 
+code.footprint { font-family: ui-monospace, Consolas, monospace; font-weight: 700; color: #067647; }
+
 /* ---------- responsive ---------- */
 @media (max-width: 1080px) {
   .grid-2, .checkin-layout { grid-template-columns: minmax(0, 1fr); }

@@ -2,7 +2,7 @@ import { ReactNode, useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   Bell, BookOpen, Building2, CalendarClock, CalendarDays, ChartColumn, ClipboardCheck, DoorOpen, GraduationCap,
-  CalendarRange, CalendarX2, FilePenLine, KeyRound, Landmark, Layers, LayoutDashboard, LogOut, Menu, Network, School, Settings, UserCog, Users, Wallet,
+  CalendarRange, CalendarX2, FilePenLine, KeyRound, Landmark, Layers, LayoutDashboard, LogOut, Menu, Microscope, Network, School, Settings, UserCog, Users, Wallet,
   Workflow, X,
 } from 'lucide-react';
 import { api, assetUrl } from '../api';
@@ -37,6 +37,7 @@ const NAV: { section: string; items: NavItem[] }[] = [
       { to: '/reports', label: 'Reports', icon: <ChartColumn size={18} />, roles: ['admin', 'dean', 'hod', 'lecturer'] },
       { to: '/exams', label: 'Exams', icon: <FilePenLine size={18} />, roles: ['admin', 'dean', 'hod', 'lecturer', 'student'] },
       { to: '/leave', label: 'Leave', icon: <CalendarX2 size={18} />, roles: ['admin', 'dean', 'hod', 'lecturer'] },
+      { to: '/research', label: 'Research', icon: <Microscope size={18} />, roles: ['admin', 'dean', 'hod', 'lecturer', 'student'] },
     ],
   },
   {

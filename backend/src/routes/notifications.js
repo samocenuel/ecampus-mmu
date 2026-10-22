@@ -29,7 +29,13 @@ router.post('/:id/read', (req, res) => {
 
 router.get('/preferences', (req, res) => {
   const p = notificationPrefs(req.user.id);
-  res.json({ enabled: Boolean(p.enabled), minutes_before: p.minutes_before });
+  res.json({
+    enabled: Boolean(p.enabled),
+    minutes_before: p.minutes_before,
+    research_enabled: Boolean(p.research_enabled),
+    research_day_before: Boolean(p.research_day_before),
+    research_minutes_before: p.research_minutes_before,
+  });
 });
 
 router.put('/preferences', (req, res) => {
@@ -37,14 +43,23 @@ router.put('/preferences', (req, res) => {
   const enabled = req.body?.enabled !== undefined ? (truthy(req.body.enabled) ? 1 : 0) : current.enabled;
   const minutes = req.body?.minutes_before !== undefined ? toInt(req.body.minutes_before) : current.minutes_before;
   if (!(minutes >= 1 && minutes <= 120)) throw badRequest('Reminder time must be between 1 and 120 minutes');
+  const b = req.body || {};
+  const research = b.research_enabled !== undefined ? (truthy(b.research_enabled) ? 1 : 0) : current.research_enabled;
+  const dayBefore = b.research_day_before !== undefined ? (truthy(b.research_day_before) ? 1 : 0) : current.research_day_before;
+  const researchMinutes = b.research_minutes_before !== undefined ? toInt(b.research_minutes_before) : current.research_minutes_before;
+  if (!(researchMinutes >= 5 && researchMinutes <= 720)) throw badRequest('Presentation and defence reminders must be between 5 minutes and 12 hours before');
   q.run(
-    `INSERT INTO notification_prefs (user_id, enabled, minutes_before) VALUES (?, ?, ?)
-       ON CONFLICT (user_id) DO UPDATE SET enabled = excluded.enabled, minutes_before = excluded.minutes_before`,
+    `INSERT INTO notification_prefs (user_id, enabled, minutes_before, research_enabled, research_day_before, research_minutes_before) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (user_id) DO UPDATE SET enabled = excluded.enabled, minutes_before = excluded.minutes_before,
+         research_enabled = excluded.research_enabled, research_day_before = excluded.research_day_before, research_minutes_before = excluded.research_minutes_before`,
     req.user.id,
     enabled,
     minutes,
+    research,
+    dayBefore,
+    researchMinutes,
   );
-  res.json({ enabled: Boolean(enabled), minutes_before: minutes });
+  res.json({ enabled: Boolean(enabled), minutes_before: minutes, research_enabled: Boolean(research), research_day_before: Boolean(dayBefore), research_minutes_before: researchMinutes });
 });
 
 /** Upcoming lecture occurrences - the mobile app schedules local alarms from this. */

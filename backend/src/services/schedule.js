@@ -4,8 +4,9 @@ import { currentTerm, placeholders } from '../scope.js';
 import { addDays, dowOf, toMinutes, zonedNow } from '../util.js';
 import { autoCloseCheckins } from './checkin.js';
 import { notify } from './notify.js';
-import { occurrences, occurrencesForUser } from './occurrences.js';
+import { localToUtc, occurrences, occurrencesForUser } from './occurrences.js';
 import { runMissedLectureAlerts } from './ops.js';
+import { researchEventsFor, participantsOf } from './research.js';
 import { rolloverAll } from './rollover.js';
 import { listSessions } from './timetable.js';
 
@@ -18,7 +19,15 @@ export function sessionsForUser(user, termId) {
 }
 
 export function notificationPrefs(userId) {
-  return q.get('SELECT enabled, minutes_before FROM notification_prefs WHERE user_id = ?', userId) || { enabled: 1, minutes_before: 15 };
+  return (
+    q.get('SELECT enabled, minutes_before, research_enabled, research_day_before, research_minutes_before FROM notification_prefs WHERE user_id = ?', userId) || {
+      enabled: 1,
+      minutes_before: 15,
+      research_enabled: 1,
+      research_day_before: 1,
+      research_minutes_before: 60,
+    }
+  );
 }
 
 /** Concrete lecture occurrences for the next `days` days, in the university's local time. */
@@ -47,6 +56,17 @@ export function upcomingForUser(user, days = 7) {
       original_date: o.original_date || null,
     });
   }
+  base.research_enabled = Boolean(prefs.research_enabled);
+  base.research_day_before = Boolean(prefs.research_day_before);
+  base.research_minutes_before = prefs.research_minutes_before;
+  base.events = researchEventsFor(user, now.date, addDays(now.date, days - 1)).map((e) => ({
+    type: e.type,
+    project_id: e.project.id,
+    title: e.title,
+    work_title: e.project.title,
+    starts_at_local: `${e.at.slice(0, 10)}T${e.at.slice(11, 16) || '09:00'}:00`,
+    venue: e.venue || null,
+  }));
   return base;
 }
 
@@ -89,6 +109,33 @@ export function runReminders(at = new Date()) {
   return sent;
 }
 
+/**
+ * Reminders for concept presentations and defences: the day before and shortly before, as each
+ * participant chose under Notifications. Each fires once per person per event and time, so a
+ * rescheduled event reminds again for its new time.
+ */
+export function runResearchReminders(at = new Date()) {
+  for (const uni of q.all('SELECT id, timezone FROM universities WHERE active = 1')) {
+    const today = zonedNow(uni.timezone || 'UTC', at).date;
+    const anyone = { university_id: uni.id, role: 'admin', id: 0 };
+    for (const e of researchEventsFor(anyone, today, addDays(today, 1))) {
+      const start = localToUtc(e.at.slice(0, 10), e.at.slice(11, 16) || '09:00', uni.timezone || 'UTC');
+      const left = (start.getTime() - at.getTime()) / 60000;
+      if (left <= 0) continue;
+      for (const uid of participantsOf(e.project)) {
+        const prefs = notificationPrefs(uid);
+        if (!prefs.research_enabled) continue;
+        const when = `${e.at.slice(11, 16)}${e.venue ? ` in ${e.venue}` : ''}`;
+        if (left <= prefs.research_minutes_before) {
+          notify(uid, { title: `Starting soon: ${e.title}`, body: `${when}. ${e.project.title}`, type: 'research', link: `/research/${e.project.id}`, dedupeKey: `research:${e.type}:${e.project.id}:${e.at}:soon` });
+        } else if (prefs.research_day_before && left <= 1440) {
+          notify(uid, { title: `Tomorrow: ${e.title}`, body: `${e.at.slice(0, 10)} ${when}. ${e.project.title}`, type: 'research', link: `/research/${e.project.id}`, dedupeKey: `research:${e.type}:${e.project.id}:${e.at}:day` });
+        }
+      }
+    }
+  }
+}
+
 export function startReminderLoop() {
   let ticks = 0;
   const tick = () => {
@@ -106,6 +153,11 @@ export function startReminderLoop() {
     // Terms follow their dates, classes move up at the start of a new academic year, and each
     // semester's allocations are drafted from last year (checked at start-up, then hourly).
     if (ticks % 60 === 0) rolloverAll();
+    try {
+      runResearchReminders();
+    } catch (err) {
+      console.error('[research reminders]', err);
+    }
     ticks++;
   };
   tick();

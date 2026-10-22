@@ -22,6 +22,7 @@ import dashboardRoutes from './routes/dashboard.js';
 import claimRoutes from './routes/claims.js';
 import calendarRoutes from './routes/calendar.js';
 import verifyRoutes from './routes/verify.js';
+import researchRoutes from './routes/research.js';
 import checkinRoutes from './routes/checkin.js';
 import examRoutes from './routes/exams.js';
 import opsRoutes from './routes/ops.js';
@@ -101,6 +102,7 @@ export function createApp({ basePath = config.basePath } = {}) {
   tenant.use('/university', universityRoutes);
   tenant.use('/', structureRoutes);
   tenant.use('/users', userRoutes);
+  tenant.use('/research', researchRoutes);
   tenant.use('/', academicRoutes);
   tenant.use('/allocations', allocationRoutes);
   tenant.use('/timetable', timetableRoutes);

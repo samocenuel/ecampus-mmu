@@ -79,6 +79,39 @@ function ReminderSettings() {
   );
 }
 
+const RESEARCH_LEAD = [15, 30, 60, 120, 180, 360, 720];
+
+function ResearchReminderSettings() {
+  const { toast, fail } = useFeedback();
+  const { data: prefs, setData } = useFetch<any>('/api/notifications/preferences');
+  const save = async (patch: any) => {
+    try {
+      const next = await api('/api/notifications/preferences', { method: 'PUT', body: { ...prefs, ...patch } });
+      setData(next);
+      toast('Reminder settings saved');
+    } catch (err) {
+      fail(err);
+    }
+  };
+  if (!prefs) return null;
+  return (
+    <Card title={<span className="row gap-sm"><BellRing size={18} /> Presentations and defences</span>}>
+      <div className="stack">
+        <Toggle checked={prefs.research_enabled} onChange={(v) => save({ research_enabled: v })} label="Remind me before research presentations and defences I take part in" />
+        <Toggle checked={prefs.research_day_before} onChange={(v) => save({ research_day_before: v })} label="Also remind me the day before" />
+        <Field label="Remind me" help="Applies to the bell, the mobile app and, where your calendar app supports it, your calendar subscription.">
+          <Select
+            value={prefs.research_minutes_before}
+            disabled={!prefs.research_enabled}
+            onChange={(e) => save({ research_minutes_before: Number(e.target.value) })}
+            options={RESEARCH_LEAD.map((m) => ({ value: m, label: m < 60 ? `${m} minutes before` : `${m / 60} hour${m > 60 ? 's' : ''} before` }))}
+          />
+        </Field>
+      </div>
+    </Card>
+  );
+}
+
 export default function Notifications() {
   const { data, loading, error, reload } = useFetch<any>('/api/notifications?limit=100');
   const { fail } = useFeedback();
@@ -101,6 +134,7 @@ export default function Notifications() {
       <PageHeader title="Notifications" subtitle="Lecture reminders, approvals and timetable changes." />
       <div className="grid-2 align-start">
         <ReminderSettings />
+        <ResearchReminderSettings />
         <Card
           title={<span className="row gap-sm">Inbox {data?.unread_count ? <Badge tone="primary">{data.unread_count} new</Badge> : null}</span>}
           actions={

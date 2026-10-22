@@ -64,7 +64,7 @@ final programmesSpec = RSpec(
   noun: 'Programme',
   endpoint: '/api/programs',
   titleOf: (r) => '${r['code']} · ${r['name']}',
-  subtitleOf: (r) => '${r['department_name']} · ${r['level']} · ${r['duration_years']} yrs · ${r['course_unit_count']} units',
+  subtitleOf: (r) => '${r['department_name']} · ${r['level']} · ${r['duration_years']} yrs · ${r['course_unit_count']} units${r['research_enabled'] == 1 || r['research_enabled'] == true ? ' · research from Y${r['research_year'] ?? 1}' : ''}',
   canCreate: _managers,
   canEdit: _managers,
   canDelete: _managers,
@@ -76,8 +76,20 @@ final programmesSpec = RSpec(
     const FSpec('code', 'Code', required: true),
     FSpec('level', 'Level', type: FType.select, required: true, options: [for (final l in _levels) (l, l)], defaultValue: 'Bachelor'),
     const FSpec('duration_years', 'Duration (years)', type: FType.number, defaultValue: 3),
+    const FSpec('research_enabled', 'Students do research', type: FType.toggle, defaultValue: false, help: "Master's: dissertation; PhD: thesis; others: project"),
+    FSpec('research_year', 'Research starts in year of study', type: FType.number, showIf: (f) => f['research_enabled'] == true),
+    FSpec('research_reports', 'Progress reports required', type: FType.number, defaultValue: 3, showIf: (f) => f['research_enabled'] == true),
   ],
-  fromRow: (r) => {'department_id': r['department_id'], 'name': r['name'], 'code': r['code'], 'level': r['level'], 'duration_years': r['duration_years']},
+  fromRow: (r) => {
+    'department_id': r['department_id'],
+    'name': r['name'],
+    'code': r['code'],
+    'level': r['level'],
+    'duration_years': r['duration_years'],
+    'research_enabled': r['research_enabled'] == 1 || r['research_enabled'] == true,
+    'research_year': r['research_year'],
+    'research_reports': r['research_reports'] ?? 3,
+  },
 );
 
 final courseUnitsSpec = RSpec(

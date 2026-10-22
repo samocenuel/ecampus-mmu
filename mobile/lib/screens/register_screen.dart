@@ -72,6 +72,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
   final _keys = [GlobalKey<FormState>(), GlobalKey<FormState>(), GlobalKey<FormState>()];
 
   Future<void> _submit() async {
+    if (_logo == null) return showMessage(context, "Upload your institution's logo first (Logo & theme colour)", error: true);
     if (_f['password']!.text != _f['confirm']!.text) return showMessage(context, 'Passwords do not match', error: true);
     setState(() => _busy = true);
     final app = context.read<AppState>();
@@ -96,6 +97,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
           app.setUniversity(uni as Map<String, dynamic>);
         } catch (_) {
           // The university exists; the logo can be uploaded again from settings.
+          if (mounted) showMessage(context, 'Your university was created, but the logo did not upload. Add it under More, University profile.', error: true);
         }
       }
       if (mounted) Navigator.of(context).popUntil((r) => r.isFirst);
@@ -162,7 +164,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
             ),
           ),
           Step(
-            title: const Text('Logo & theme colour'),
+            title: const Text('Logo & theme colour *'),
             isActive: _step >= 1,
             content: Form(
               key: _keys[1],

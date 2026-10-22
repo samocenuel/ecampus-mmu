@@ -100,9 +100,17 @@ export default function Login() {
   const [forgot, setForgot] = useState(false);
 
   useEffect(() => {
-    api<{ available: boolean; roles: DemoRole[] }>('/api/auth/demo')
-      .then((d) => setDemoRoles(d.available ? d.roles : []))
-      .catch(() => {});
+    let cancelled = false;
+    const load = (attempt: number) =>
+      api<{ available: boolean; roles: DemoRole[] }>('/api/auth/demo')
+        .then((d) => !cancelled && setDemoRoles(d.available ? d.roles : []))
+        .catch(() => {
+          if (!cancelled && attempt < 5) setTimeout(() => load(attempt + 1), 2000 * attempt);
+        });
+    load(1);
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   if (user) return <Navigate to="/" replace />;

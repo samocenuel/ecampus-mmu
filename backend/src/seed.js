@@ -26,6 +26,7 @@ const rand = () => ((seed = (seed * 1664525 + 1013904223) % 4294967296) / 429496
 
 function wipe() {
   for (const t of [
+    'research_events', 'research_reports', 'research_documents', 'research_mentors', 'research_supervisors', 'research_projects', 'research_coordinators',
     'pay_budgets', 'exam_overrides', 'coursework_marks', 'exam_invigilators', 'exam_rooms', 'exams', 'leave_covers', 'leave_requests',
     'calendar_events', 'session_changes', 'attendance_corrections', 'checkin_flags', 'checkins', 'checkin_sessions', 'student_devices',
     'pay_claim_events', 'pay_claim_lines', 'pay_claims', 'pay_votes', 'pay_rates',
@@ -287,6 +288,8 @@ export function seedDemo({ quiet = false, ownerPassword = DEMO_PASSWORD } = {}) 
     log('Part-time pay: rates, votes and sample claims');
     seedOps({ uni, today: now.date, historyEnd: now.date });
     log('Calendar, changes, leave, exams, coursework and check-ins');
+    seedResearch(uni);
+    log('Research projects');
     return { university_id: uni, term_id: term1 };
   });
 }
@@ -330,6 +333,11 @@ export function upgradeDemo({ quiet = false } = {}) {
     tx(() => seedVotes(uni.id));
     changed = true;
     if (!quiet) console.log('Demo upgraded with votes for part-time pay');
+  }
+  if (!q.get('SELECT 1 FROM research_coordinators WHERE university_id = ?', uni.id)) {
+    tx(() => seedResearch(uni.id));
+    changed = true;
+    if (!quiet) console.log('Demo upgraded with research projects');
   }
   if (!q.get('SELECT 1 FROM calendar_events WHERE university_id = ?', uni.id)) {
     tx(() => seedOps({ uni: uni.id, today: zonedNow(TZ).date, historyEnd: last || zonedNow(TZ).date }));
@@ -429,6 +437,90 @@ function seedPay({ uni, today, hrId, deans, lecturer }) {
 }
 
 /** Academic calendar, lecture changes, leave, exams, coursework, QR check-ins and budgets. */
+/**
+ * Research in the demo: BSCS has research on (from Year 1 so visitors can try it, two progress
+ * reports), Brian Kato coordinates for Computer Science, and three BSCS Year 2 students are at
+ * different stages: a new concept, work in progress with progress reports, and a defence coming up.
+ */
+function seedResearch(uni) {
+  const bscs = q.get("SELECT * FROM programs WHERE university_id = ? AND code = 'BSCS'", uni);
+  const cs = q.get("SELECT * FROM departments WHERE university_id = ? AND code = 'CS'", uni);
+  if (!bscs || !cs) return;
+  q.run('UPDATE programs SET research_enabled = 1, research_year = 1, research_reports = 2 WHERE id = ?', bscs.id);
+  const staff = (email) => q.get('SELECT id FROM users WHERE email = ?', email)?.id;
+  const brian = staff('brian.kato@demo.edu');
+  const ivan = staff('ivan.ssemwogerere@demo.edu');
+  const esther = staff('esther.atim@demo.edu');
+  const hod = cs.hod_id;
+  if (!brian || !ivan || !hod) return;
+  q.run('INSERT OR IGNORE INTO research_coordinators (university_id, department_id, user_id, appointed_by) VALUES (?, ?, ?, ?)', uni, cs.id, brian, hod);
+  const students = q.all(
+    "SELECT u.id FROM users u JOIN classes c ON c.id = u.class_id WHERE c.program_id = ? AND c.year_of_study = 2 AND c.status = 'active' AND u.role = 'student' ORDER BY u.id LIMIT 3",
+    bscs.id,
+  ).map((r) => r.id);
+  if (students.length < 3) return;
+  const today = zonedNow(TZ).date;
+  const at = (days, time = '10:00:00') => `${addDays(today, days)} ${time}`;
+  const project = (student, title, problem, status, extra = {}) =>
+    insert('research_projects', {
+      university_id: uni, student_id: student, program_id: bscs.id, department_id: cs.id, kind: 'project', title, problem,
+      objectives: 'Describe the current situation, design a solution, and evaluate it with users.',
+      methodology: 'Mixed methods: survey, interviews and a prototype evaluated in the field.',
+      status, reports_required: 2, submitted_at: at(-60), ...extra,
+    });
+  const ev = (pid, actor, stage, step, action, note, when) =>
+    insert('research_events', { project_id: pid, actor_id: actor, stage, step, action, note: note || null, created_at: when });
+
+  // A concept waiting for the coordinator.
+  const a = project(students[0], 'Mobile money adoption among market vendors in Fort Portal', 'Many vendors still keep cash only.', 'concept_submitted', { submitted_at: at(-2) });
+  ev(a, students[0], 'concept', null, 'submitted', null, at(-2));
+
+  // Work in progress: supervisor and mentor in place, one report approved, one waiting.
+  const b = project(students[1], 'Offline-first attendance tracking for rural schools', 'Connectivity in rural schools is unreliable.', 'in_progress');
+  ev(b, students[1], 'concept', null, 'submitted', null, at(-60));
+  ev(b, brian, 'concept', 'coordinator', 'approved', `Presentation ${at(-50).slice(0, 16)}, Seminar Room A`, at(-55));
+  ev(b, brian, 'presentation', 'coordinator', 'passed', 'Clear problem and plan', at(-50));
+  q.run("INSERT INTO research_supervisors (project_id, user_id, role, assigned_by) VALUES (?, ?, 'main', ?)", b, ivan, brian);
+  ev(b, brian, 'supervision', 'coordinator', 'assigned', 'Ivan Ssemwogerere (main supervisor)', at(-49));
+  insert('research_mentors', { project_id: b, name: 'Grace Atuhaire', institution: 'Kabarole District ICT Office', email: 'grace.atuhaire@example.org', status: 'confirmed', proposed_by: students[1], decided_by: brian, decided_at: at(-47) });
+  ev(b, hod, 'start', 'hod', 'approved', null, at(-46));
+  insert('research_reports', { project_id: b, number: 1, title: 'Literature review and survey design', summary: 'Reviewed 24 studies; survey piloted with 10 teachers.', status: 'approved', supervisor_id: ivan, supervisor_at: at(-30), hod_id: hod, hod_at: at(-28) });
+  ev(b, ivan, 'report', 'supervisor', 'approved', 'Progress report 1', at(-30));
+  ev(b, hod, 'report', 'hod', 'approved', 'Progress report 1', at(-28));
+  insert('research_reports', { project_id: b, number: 2, title: 'Prototype and first field visit', summary: 'Prototype tested in two schools.', status: 'submitted' });
+  ev(b, students[1], 'report', null, 'submitted', 'Progress report 2: Prototype and first field visit', at(-3));
+
+  // Defence coming up: every sign-off done.
+  const c = project(students[2], 'Predicting student dropout from attendance data', 'Dropouts are noticed too late.', 'defence_scheduled', {
+    defence_at: `${addDays(today, 14)} 09:00`, defence_venue: 'Board Room', defence_panel: 'Dr. Peter Okello, Mr. Brian Kato, Ms. Esther Atim',
+  });
+  const steps = [
+    [students[2], 'concept', null, 'submitted', null, -120],
+    [brian, 'concept', 'coordinator', 'approved', 'Presentation scheduled', -115],
+    [brian, 'presentation', 'coordinator', 'passed', null, -110],
+    [hod, 'start', 'hod', 'approved', null, -105],
+    [ivan, 'report', 'supervisor', 'approved', 'Progress report 1', -80],
+    [hod, 'report', 'hod', 'approved', 'Progress report 1', -79],
+    [ivan, 'report', 'supervisor', 'approved', 'Progress report 2', -50],
+    [hod, 'report', 'hod', 'approved', 'Progress report 2', -49],
+    [students[2], 'intent', null, 'submitted', 'Model, evaluation on two years of registers, dashboard', -40],
+    [ivan, 'intent', 'supervisor', 'signed', null, -39],
+    [brian, 'intent', 'coordinator', 'signed', null, -38],
+    [hod, 'intent', 'hod', 'signed', null, -37],
+    [students[2], 'final', null, 'submitted', null, -20],
+    [ivan, 'final', 'supervisor', 'signed', null, -18],
+    [brian, 'final', 'coordinator', 'signed', null, -16],
+    [hod, 'final', 'hod', 'signed', null, -15],
+    [brian, 'defence', 'coordinator', 'scheduled', `${addDays(today, 14)} 09:00, Board Room`, -10],
+  ];
+  for (const [actor, stage, step, action, note, d] of steps) ev(c, actor, stage, step, action, note, at(d));
+  q.run("INSERT INTO research_supervisors (project_id, user_id, role, assigned_by) VALUES (?, ?, 'main', ?)", c, ivan, brian);
+  if (esther) q.run("INSERT INTO research_supervisors (project_id, user_id, role, assigned_by) VALUES (?, ?, 'co', ?)", c, esther, brian);
+  for (const [n, title, d] of [[1, 'Data collection and cleaning', -80], [2, 'Model and first results', -50]]) {
+    insert('research_reports', { project_id: c, number: n, title, summary: 'See attached.', status: 'approved', supervisor_id: ivan, supervisor_at: at(d), hod_id: hod, hod_at: at(d + 1) });
+  }
+}
+
 function seedOps({ uni, today, historyEnd }) {
   const term = q.get('SELECT * FROM academic_terms WHERE university_id = ? AND is_current = 1', uni);
   if (!term) return;

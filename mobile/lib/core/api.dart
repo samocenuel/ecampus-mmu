@@ -55,6 +55,15 @@ class Api {
 
   Future<dynamic> delete(String path) => _send(() => _client.delete(_uri(path), headers: _headers));
 
+  /// A form with text fields and an optional file (e.g. a research document).
+  Future<dynamic> uploadForm(String path, Map<String, String> fields, {String method = 'POST', String field = 'document', List<int>? bytes, String? filename, String? contentType}) async {
+    final request = http.MultipartRequest(method, _uri(path))
+      ..headers.addAll(_headers)
+      ..fields.addAll(fields);
+    if (bytes != null) request.files.add(http.MultipartFile.fromBytes(field, bytes, filename: filename, contentType: _mediaType(contentType ?? 'application/octet-stream')));
+    return _send(() async => http.Response.fromStream(await _client.send(request)));
+  }
+
   Future<dynamic> upload(String path, String field, List<int> bytes, String filename, String contentType) async {
     final request = http.MultipartRequest('POST', _uri(path))
       ..headers.addAll(_headers)

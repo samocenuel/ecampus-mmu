@@ -14,6 +14,7 @@ import 'leave_screen.dart';
 import 'lectures_screen.dart';
 import 'profile_screen.dart';
 import 'reports_screen.dart';
+import 'research_screen.dart';
 
 class MoreScreen extends StatelessWidget {
   const MoreScreen({super.key});
@@ -54,6 +55,7 @@ class MoreScreen extends StatelessWidget {
           tile(Icons.event_available_outlined, 'Add to my calendar', () => showCalendarSync(context), subtitle: 'Google, Apple or Outlook calendar'),
         ],
         if (app.isStudent || app.isStaff) tile(Icons.assignment_outlined, 'Exams', () => open(const ExamsScreen()), subtitle: app.isStudent ? 'Timetable and whether you qualify' : 'Invigilation and eligibility'),
+        if (app.isStudent || app.teaches || app.isManager) tile(Icons.science_outlined, 'Research', () => open(const ResearchScreen()), subtitle: app.isStudent ? 'Project, dissertation or thesis' : 'Concepts, supervision, defences'),
         if (app.teaches || app.isManager) tile(Icons.beach_access_outlined, 'Leave', () => open(const LeaveScreen()), subtitle: app.isManager ? 'Requests, checks and cover' : 'Request short-term leave'),
         if (app.isStaff) ...[
           header('Teaching'),

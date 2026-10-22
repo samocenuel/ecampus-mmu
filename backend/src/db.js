@@ -317,6 +317,114 @@ CREATE INDEX IF NOT EXISTS idx_pay_events_claim ON pay_claim_events(claim_id);
 
 // Teaching operations and exams: QR check-in, attendance corrections, lecture changes, the
 // academic calendar, leave with cover lecturers, exam timetables, coursework marks and budgets.
+// Research supervision: a student's project (undergraduate), dissertation (Master's) or thesis
+// (PhD) from concept to clearance, with every sign-off kept as an event.
+const RESEARCH_SCHEMA = `
+CREATE TABLE IF NOT EXISTS research_coordinators (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  university_id INTEGER NOT NULL REFERENCES universities(id) ON DELETE CASCADE,
+  department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  appointed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (department_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS research_projects (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  university_id INTEGER NOT NULL REFERENCES universities(id) ON DELETE CASCADE,
+  student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  program_id INTEGER REFERENCES programs(id) ON DELETE SET NULL,
+  department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('project','dissertation','thesis')),
+  title TEXT NOT NULL,
+  problem TEXT,
+  objectives TEXT,
+  methodology TEXT,
+  status TEXT NOT NULL DEFAULT 'concept_submitted',
+  reports_required INTEGER NOT NULL DEFAULT 3,
+  presentation_at TEXT,
+  presentation_venue TEXT,
+  defence_at TEXT,
+  defence_venue TEXT,
+  defence_panel TEXT,
+  outcome_note TEXT,
+  verify_code TEXT UNIQUE,
+  submitted_at TEXT,
+  cleared_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_research_student ON research_projects(student_id);
+CREATE INDEX IF NOT EXISTS idx_research_department ON research_projects(department_id, status);
+
+CREATE TABLE IF NOT EXISTS research_supervisors (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role TEXT NOT NULL DEFAULT 'main' CHECK (role IN ('main','co')),
+  assigned_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (project_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS research_mentors (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  email TEXT,
+  phone TEXT,
+  institution TEXT,
+  status TEXT NOT NULL DEFAULT 'proposed' CHECK (status IN ('proposed','confirmed','declined')),
+  proposed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  decided_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  decided_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS research_documents (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+  stage TEXT NOT NULL,
+  file_name TEXT NOT NULL,
+  original_name TEXT NOT NULL,
+  mime TEXT,
+  size INTEGER,
+  uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS research_reports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+  number INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  summary TEXT,
+  document_id INTEGER REFERENCES research_documents(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'submitted' CHECK (status IN ('submitted','supervisor_approved','approved','returned')),
+  supervisor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  supervisor_at TEXT,
+  supervisor_note TEXT,
+  hod_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  hod_at TEXT,
+  hod_note TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- History and sign-offs. An approval here is a digital signature (see services/research.js).
+CREATE TABLE IF NOT EXISTS research_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+  actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  stage TEXT NOT NULL,
+  step TEXT,
+  action TEXT NOT NULL,
+  note TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_research_events ON research_events(project_id, id);
+`;
+
 const OPS_SCHEMA = `
 CREATE TABLE IF NOT EXISTS student_devices (
   user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -538,7 +646,9 @@ const ADDED_COLUMNS = {
   },
   users: { calendar_token: 'TEXT', must_change_password: 'INTEGER NOT NULL DEFAULT 0', photo_path: 'TEXT' },
   pay_claims: { vote_id: 'INTEGER', verify_code: 'TEXT' },
-  programs: { coursework_max: 'REAL NOT NULL DEFAULT 40' },
+  notification_prefs: { research_enabled: 'INTEGER NOT NULL DEFAULT 1', research_day_before: 'INTEGER NOT NULL DEFAULT 1', research_minutes_before: 'INTEGER NOT NULL DEFAULT 60' },
+  // Research: the HoD turns it on per programme, says from which year of study, and how many progress reports.
+  programs: { coursework_max: 'REAL NOT NULL DEFAULT 40', research_enabled: 'INTEGER NOT NULL DEFAULT 0', research_year: 'INTEGER', research_reports: 'INTEGER NOT NULL DEFAULT 3' },
   classes: { curriculum_version_id: 'INTEGER', status: "TEXT NOT NULL DEFAULT 'active'", completed_at: 'TEXT', intake_year: 'TEXT' },
   allocations: { status: "TEXT NOT NULL DEFAULT 'confirmed'", carried_from: 'INTEGER' },
   academic_terms: { carried_over_at: 'TEXT' },
@@ -665,6 +775,7 @@ db.exec(SCHEMA);
 migrate();
 db.exec(PAY_SCHEMA);
 db.exec(OPS_SCHEMA);
+db.exec(RESEARCH_SCHEMA);
 addColumns();
 migrateCurriculumVersions();
 

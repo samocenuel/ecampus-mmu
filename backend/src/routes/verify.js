@@ -4,6 +4,7 @@ import { Router } from 'express';
 import { q } from '../db.js';
 import { STAGES } from '../services/pay.js';
 import { formatCode, normaliseCode, publicBase, signOffs } from '../services/requisition.js';
+import { certificateSignOffs, KIND_LABEL, projectSelect, STATUS_LABEL } from '../services/research.js';
 import { notFound } from '../util.js';
 import { universityPayload } from './university.js';
 
@@ -23,10 +24,35 @@ router.get('/:code', (req, res) => {
         WHERE pc.verify_code = ?`,
       code,
     );
-  if (!claim || claim.status === 'draft') throw notFound('Requisition');
+  if (!claim || claim.status === 'draft') {
+    const project = code.length === 10 && q.get(`${projectSelect} WHERE rp.verify_code = ?`, code);
+    if (!project) throw notFound('Document');
+    const u = universityPayload(q.get('SELECT * FROM universities WHERE id = ?', project.university_id));
+    res.set('Cache-Control', 'no-store');
+    return res.json({
+      type: 'research',
+      code: formatCode(code),
+      university: { name: u.name, short_name: u.short_name, logo_url: u.logo_url, primary_color: u.primary_color },
+      research: {
+        id: project.id,
+        kind_label: KIND_LABEL[project.kind],
+        title: project.title,
+        student: project.student_name,
+        identifier: project.student_identifier,
+        program: project.program_name,
+        department: project.department_name,
+        status_label: STATUS_LABEL[project.status],
+        cleared: project.status === 'cleared',
+        cleared_at: project.cleared_at,
+        defence_at: project.defence_at,
+      },
+      sign_offs: certificateSignOffs(project.id).map((s) => ({ step: s.label, name: s.name, at: s.at, footprint: s.footprint })),
+    });
+  }
   const uni = universityPayload(q.get('SELECT * FROM universities WHERE id = ?', claim.university_id));
   res.set('Cache-Control', 'no-store');
   res.json({
+    type: 'requisition',
     code: formatCode(code),
     university: { name: uni.name, short_name: uni.short_name, logo_url: uni.logo_url, primary_color: uni.primary_color },
     requisition: {

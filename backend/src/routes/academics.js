@@ -68,7 +68,20 @@ router.get('/programs/:id', (req, res) => {
   res.json(program);
 });
 
-const PROGRAM_FIELDS = ['department_id', 'name', 'code', 'level', 'duration_years', 'coursework_max'];
+const PROGRAM_FIELDS = ['department_id', 'name', 'code', 'level', 'duration_years', 'coursework_max', 'research_enabled', 'research_year', 'research_reports'];
+
+/** Research settings: on or off, from which year of study, and how many progress reports. */
+function checkResearch(data) {
+  if (data.research_enabled !== undefined) data.research_enabled = data.research_enabled === true || data.research_enabled === 1 || data.research_enabled === '1' || data.research_enabled === 'true' ? 1 : 0;
+  if (data.research_year !== undefined) {
+    data.research_year = data.research_year === '' || data.research_year === null ? null : Number(data.research_year);
+    if (data.research_year !== null && !(Number.isInteger(data.research_year) && data.research_year >= 1 && data.research_year <= 10)) throw badRequest('Research year must be a year of study (1 to 10)');
+  }
+  if (data.research_reports !== undefined) {
+    data.research_reports = Number(data.research_reports);
+    if (!(Number.isInteger(data.research_reports) && data.research_reports >= 0 && data.research_reports <= 20)) throw badRequest('Progress reports must be between 0 and 20');
+  }
+}
 
 /** A programme's curriculum versions with how many units and running classes each has. */
 function versionsOf(programId) {
@@ -147,6 +160,7 @@ router.post('/programs', requireRole(...MANAGER_ROLES), (req, res) => {
   requireFields(req.body, ['department_id', 'name', 'code']);
   const data = pick(req.body, PROGRAM_FIELDS);
   checkCourseworkMax(data);
+  checkResearch(data);
   one('SELECT id FROM departments WHERE id = ? AND university_id = ?', 'Department', data.department_id, req.uid);
   assertManageDepartment(req.user, data.department_id);
   data.code = String(data.code).trim().toUpperCase();
@@ -163,6 +177,7 @@ router.put('/programs/:id', requireRole(...MANAGER_ROLES), (req, res) => {
   assertManageDepartment(req.user, p.department_id);
   const data = pick(req.body, PROGRAM_FIELDS);
   checkCourseworkMax(data);
+  checkResearch(data);
   if (data.department_id) {
     one('SELECT id FROM departments WHERE id = ? AND university_id = ?', 'Department', data.department_id, req.uid);
     assertManageDepartment(req.user, data.department_id);

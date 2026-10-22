@@ -18,6 +18,9 @@ class NotificationService {
 
   static const _reminderBaseId = 1000;
   static const _maxReminders = 60;
+  // Presentations and defences: the day before and shortly before.
+  static const _researchBaseId = 1100;
+  static const _maxResearch = 20;
 
   bool get supported => !kIsWeb && (defaultTargetPlatform == TargetPlatform.android || defaultTargetPlatform == TargetPlatform.iOS);
 
@@ -62,7 +65,9 @@ class NotificationService {
     for (var i = 0; i < _maxReminders; i++) {
       await _plugin.cancel(id: _reminderBaseId + i);
     }
-    if (upcoming['enabled'] != true) return 0;
+    for (var i = 0; i < _maxResearch; i++) {
+      await _plugin.cancel(id: _researchBaseId + i);
+    }
 
     tz.Location location;
     try {
@@ -70,6 +75,8 @@ class NotificationService {
     } catch (_) {
       location = tz.UTC;
     }
+    final research = await _scheduleResearch(upcoming, location);
+    if (upcoming['enabled'] != true) return research;
     final minutesBefore = (upcoming['minutes_before'] as num?)?.toInt() ?? 15;
     final now = tz.TZDateTime.now(location);
     var count = 0;
@@ -89,6 +96,39 @@ class NotificationService {
         androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
       );
       count++;
+    }
+    return count + research;
+  }
+
+  /// Reminders for concept presentations and defences the user takes part in.
+  Future<int> _scheduleResearch(Map<String, dynamic> upcoming, tz.Location location) async {
+    if (upcoming['research_enabled'] != true) return 0;
+    final minutesBefore = (upcoming['research_minutes_before'] as num?)?.toInt() ?? 60;
+    final dayBefore = upcoming['research_day_before'] == true;
+    final now = tz.TZDateTime.now(location);
+    var count = 0;
+    for (final e in (upcoming['events'] as List? ?? const [])) {
+      final local = DateTime.tryParse(e['starts_at_local'] as String? ?? '');
+      if (local == null) continue;
+      final start = tz.TZDateTime(location, local.year, local.month, local.day, local.hour, local.minute);
+      final at = '${local.hour.toString().padLeft(2, '0')}:${local.minute.toString().padLeft(2, '0')}';
+      final where = e['venue'] != null ? ' in ${e['venue']}' : '';
+      for (final (offset, title) in [
+        if (dayBefore) (const Duration(days: 1), 'Tomorrow: ${e['title']}'),
+        (Duration(minutes: minutesBefore), 'Soon: ${e['title']}'),
+      ]) {
+        final when = start.subtract(offset);
+        if (!when.isAfter(now) || count >= _maxResearch) continue;
+        await _plugin.zonedSchedule(
+          id: _researchBaseId + count,
+          title: title,
+          body: '$at$where. ${e['work_title']}',
+          scheduledDate: when,
+          notificationDetails: _details,
+          androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+        );
+        count++;
+      }
     }
     return count;
   }

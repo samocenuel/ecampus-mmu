@@ -975,3 +975,136 @@ describe('Academic years, curriculum versions, leadership handover and rollover'
     assert.ok((await api('GET', '/api/classes?status=completed', { token: admin })).data.some((c) => c.id === before.bba2.id));
   });
 });
+
+describe('Research: project, dissertation or thesis from concept to clearance', () => {
+  const pdf = () => new Blob([Buffer.from('%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF')], { type: 'application/pdf' });
+  async function upload(method, url, token, fields, withFile = true) {
+    const form = new FormData();
+    for (const [k, v] of Object.entries(fields)) form.append(k, v);
+    if (withFile) form.append('document', pdf(), 'work.pdf');
+    const res = await fetch(base + url, { method, headers: { Authorization: `Bearer ${token}` }, body: form });
+    return { status: res.status, data: await res.json() };
+  }
+  const act = (token, id, action, extra = {}) => api('POST', `/api/research/${id}/action`, { token, body: { action, ...extra } });
+
+  test('the kind of work follows the programme level', async () => {
+    const { kindForLevel } = await import('../src/services/research.js');
+    assert.equal(kindForLevel('Bachelor'), 'project');
+    assert.equal(kindForLevel('Diploma'), 'project');
+    assert.equal(kindForLevel('Masters'), 'dissertation');
+    assert.equal(kindForLevel('PhD'), 'thesis');
+  });
+
+  test('concept, presentation, supervisors, progress reports, intent, final, defence and clearance', async () => {
+    const [hod, coord, supervisor, student, other] = await Promise.all(
+      ['hod.cs@demo.edu', 'brian.kato@demo.edu', 'ivan.ssemwogerere@demo.edu', 'student.bscs1@students.demo.edu', 'esther.atim@demo.edu'].map(login),
+    );
+    const bscs = q.get("SELECT * FROM programs WHERE code = 'BSCS'");
+    const cs = q.get("SELECT * FROM departments WHERE code = 'CS'");
+    // The demo opens research for BSCS; close it to see that only the HoD's setting opens it.
+    assert.equal((await api('PUT', `/api/programs/${bscs.id}`, { token: hod, body: { research_enabled: false } })).status, 200);
+    assert.equal((await api('GET', '/api/research/eligibility', { token: student })).data.eligible, false, 'closed until the HoD turns it on');
+    assert.equal((await api('PUT', `/api/programs/${bscs.id}`, { token: hod, body: { research_enabled: true, research_year: 1, research_reports: 2 } })).status, 200);
+    const elig = (await api('GET', '/api/research/eligibility', { token: student })).data;
+    assert.equal(elig.eligible, true);
+    assert.equal(elig.kind_label, 'Project');
+    assert.equal(elig.reports_required, 2);
+
+    // The HoD appoints the research coordinator.
+    const ivan = q.get("SELECT id FROM users WHERE email = 'ivan.ssemwogerere@demo.edu'").id;
+    const brian = q.get("SELECT id FROM users WHERE email = 'brian.kato@demo.edu'").id;
+    assert.equal((await api('POST', '/api/research/coordinators', { token: other, body: { department_id: cs.id, user_id: brian } })).status, 403);
+    assert.equal((await api('POST', '/api/research/coordinators', { token: hod, body: { department_id: cs.id, user_id: brian } })).status, 201);
+    assert.ok((await api('GET', '/api/research?view=awaiting', { token: coord })).data.some((p) => p.status === 'concept_submitted'), 'the demo concept waits for the coordinator');
+
+    // 1. Concept to the coordinator.
+    const concept = await upload('POST', '/api/research', student, { title: 'Offline-first attendance for rural campuses', problem: 'Connectivity is poor.', objectives: 'Design and evaluate.', methodology: 'Design science.' });
+    assert.equal(concept.status, 201);
+    const id = concept.data.id;
+    assert.equal(concept.data.status, 'concept_submitted');
+    assert.equal((await upload('POST', '/api/research', student, { title: 'Second', problem: 'x', objectives: 'y' })).status, 400, 'one active project at a time');
+    assert.equal((await act(student, id, 'schedule_presentation', { date: '2026-11-02 10:00' })).status, 403);
+    const returned = await act(coord, id, 'return_concept', { note: 'Narrow the scope to one district' });
+    assert.equal(returned.data.status, 'concept_returned');
+    assert.equal((await upload('PUT', `/api/research/${id}/concept`, student, { title: 'Offline-first attendance in Kabarole district' }, false)).data.status, 'concept_submitted');
+
+    // 2. Presentation, supervisors and mentors, then the HoD approves the start.
+    assert.equal((await act(coord, id, 'schedule_presentation', { date: '2026-11-02 10:00', venue: 'Seminar Room A' })).data.status, 'presentation_scheduled');
+
+    // The presentation is in everyone's calendar feed, with a Google Calendar link and reminders.
+    const withLinks = (await api('GET', `/api/research/${id}`, { token: student })).data;
+    assert.match(withLinks.calendar.presentation, /^https:\/\/calendar\.google\.com\/calendar\/render\?action=TEMPLATE/);
+    const feedUrl = (await api('GET', '/api/ops/calendar-link', { token: coord })).data.url;
+    const ics = await (await fetch(feedUrl.replace(/^https?:\/\/[^/]+/, base))).text();
+    assert.match(ics, /SUMMARY:Concept presentation: /);
+    assert.match(ics, /BEGIN:VALARM/);
+    const prefs = await api('PUT', '/api/notifications/preferences', { token: student, body: { research_minutes_before: 45, research_day_before: true } });
+    assert.equal(prefs.data.research_minutes_before, 45);
+    const { runResearchReminders } = await import('../src/services/schedule.js');
+    const { localToUtc } = await import('../src/services/occurrences.js');
+    const start = localToUtc('2026-11-02', '10:00', 'Africa/Kampala');
+    runResearchReminders(new Date(start.getTime() - 20 * 3600000));
+    runResearchReminders(new Date(start.getTime() - 30 * 60000));
+    runResearchReminders(new Date(start.getTime() - 25 * 60000));
+    const sid = q.get("SELECT id FROM users WHERE email = 'student.bscs1@students.demo.edu'").id;
+    assert.equal(q.get("SELECT COUNT(*) AS n FROM notifications WHERE user_id = ? AND title LIKE 'Tomorrow: Concept presentation%'", sid).n, 1);
+    assert.equal(q.get("SELECT COUNT(*) AS n FROM notifications WHERE user_id = ? AND title LIKE 'Starting soon: Concept presentation%'", sid).n, 1, 'each reminder fires once');
+    assert.equal((await act(coord, id, 'presentation_passed', { note: 'Well argued' })).data.status, 'supervision');
+    const mentor = await api('POST', `/api/research/${id}/mentors`, { token: student, body: { name: 'Grace Atuhaire', institution: 'Kabarole District ICT Office', email: 'grace@example.org' } });
+    assert.equal(mentor.status, 201);
+    assert.equal((await api('POST', `/api/research/${id}/mentors/${mentor.data.id}/decision`, { token: coord, body: { decision: 'confirm' } })).data.status, 'confirmed');
+    assert.equal((await act(hod, id, 'approve_start')).status, 400, 'needs a main supervisor');
+    assert.equal((await api('POST', `/api/research/${id}/supervisors`, { token: coord, body: { user_id: ivan, role: 'main' } })).status, 201);
+    assert.equal((await act(hod, id, 'approve_start')).data.status, 'in_progress');
+
+    // 3. Progress reports: supervisor, then HoD; intent only after the number the HoD set.
+    assert.equal((await upload('POST', `/api/research/${id}/intent`, student, { summary: 'Too early' }, false)).status, 400);
+    for (const n of [1, 2]) {
+      const report = await upload('POST', `/api/research/${id}/reports`, student, { title: `Progress report ${n}`, summary: 'Work done this month' });
+      assert.equal(report.status, 201);
+      assert.equal(report.data.number, n);
+      assert.equal((await api('POST', `/api/research/reports/${report.data.id}/review`, { token: hod, body: { action: 'approve' } })).status, 403, 'the supervisor reviews first');
+      assert.equal((await api('POST', `/api/research/reports/${report.data.id}/review`, { token: supervisor, body: { action: 'approve' } })).data.status, 'supervisor_approved');
+      assert.equal((await api('POST', `/api/research/reports/${report.data.id}/review`, { token: hod, body: { action: 'approve' } })).data.status, 'approved');
+    }
+
+    // 4. Intent to submit: supervisor, coordinator, HoD; returned when the outputs are not clear.
+    assert.equal((await upload('POST', `/api/research/${id}/intent`, student, { summary: 'A working prototype and a field evaluation' }, false)).data.status, 'intent_review');
+    assert.equal((await act(coord, id, 'sign_intent')).status, 403, 'the supervisor signs first');
+    assert.equal((await act(supervisor, id, 'sign_intent')).status, 200);
+    assert.equal((await act(coord, id, 'return_intent', { note: 'State the evaluation outputs clearly' })).data.status, 'in_progress');
+    await upload('POST', `/api/research/${id}/intent`, student, { summary: 'Prototype, field evaluation with 3 schools, a usage report' }, false);
+    for (const t of [supervisor, coord, hod]) assert.equal((await act(t, id, 'sign_intent')).status, 200);
+    assert.equal(q.get('SELECT status FROM research_projects WHERE id = ?', id).status, 'intent_approved');
+
+    // 5. Final work: supervisor, coordinator, HoD.
+    assert.equal((await upload('POST', `/api/research/${id}/final`, student, {}, false)).status, 400, 'the final document is required');
+    assert.equal((await upload('POST', `/api/research/${id}/final`, student, { summary: 'Final report' })).data.status, 'final_review');
+    for (const t of [supervisor, coord, hod]) assert.equal((await act(t, id, 'sign_final')).status, 200);
+
+    // 6. Defence, with corrections; 7. cleared.
+    assert.equal((await act(coord, id, 'schedule_defence', { date: '2026-12-10 09:00', venue: 'Board Room', panel: 'Dr. A, Dr. B' })).data.status, 'defence_scheduled');
+    assert.equal((await act(coord, id, 'defence_corrections', { note: 'Fix chapter 4 tables' })).data.status, 'corrections');
+    assert.equal((await upload('POST', `/api/research/${id}/corrections`, student, { summary: 'Fixed' })).data.status, 'corrections_review');
+    assert.equal((await act(supervisor, id, 'approve_corrections')).data.status, 'defended');
+    assert.equal((await act(coord, id, 'clear')).status, 403, 'the HoD clears');
+    const cleared = await act(hod, id, 'clear');
+    assert.equal(cleared.data.status, 'cleared');
+
+    const detail = (await api('GET', `/api/research/${id}`, { token: student })).data;
+    assert.ok(detail.documents.length >= 4);
+    const cert = await api('GET', `/api/research/${id}/certificate`, { token: student });
+    assert.equal(cert.type, 'application/pdf');
+    const verify = await api('GET', `/api/verify/${detail.verify_code}`);
+    assert.equal(verify.data.type, 'research');
+    assert.equal(verify.data.research.cleared, true);
+    assert.ok(verify.data.sign_offs.filter((s) => s.footprint).length >= 9, 'every sign-off leaves a footprint');
+
+    // Documents are private to the people on the project.
+    const doc = detail.documents[0];
+    const dl = await api('GET', `/api/research/documents/${doc.id}`, { token: supervisor });
+    assert.equal(dl.status, 200);
+    assert.equal((await api('GET', `/api/research/documents/${doc.id}`, { token: await login('rep.bscs1@students.demo.edu') })).status, 404);
+    assert.ok((await api('GET', '/api/research?view=supervising', { token: supervisor })).data.some((p) => p.id === id));
+  });
+});
