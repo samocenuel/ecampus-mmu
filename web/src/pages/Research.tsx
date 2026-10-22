@@ -1,4 +1,4 @@
-// Research supervision: projects (undergraduate), dissertations (Master's) and theses (PhD) from
+// Research supervision: Project (undergraduate), Dissertation (Master's) and Thesis (PhD) from
 // concept to clearance.
 import { FormEvent, ReactNode, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
@@ -298,7 +298,7 @@ export default function Research() {
     <>
       <PageHeader
         title="Research"
-        subtitle={isStudent ? 'Your project, dissertation or thesis: from concept and supervision to defence and clearance.' : 'Projects (undergraduate), dissertations (Master\'s) and theses (PhD): concepts, supervision, progress reports, sign-offs and defences.'}
+        subtitle={isStudent ? 'Your project, dissertation or thesis: from concept and supervision to defence and clearance.' : 'Project (undergraduate), Dissertation (Master\'s) and Thesis (PhD): concepts, supervision, progress reports, sign-offs and defences.'}
         actions={isStudent && eligibility?.eligible && <Button icon={<Plus size={16} />} onClick={() => setStarting(true)}>Start your {eligibility.kind_label.toLowerCase()}</Button>}
       />
       <ErrorNote error={error} />

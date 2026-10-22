@@ -318,35 +318,214 @@ export function timetablePdf({ university, title, subtitle, sessions, showClasse
   });
 }
 
-/** Multi-sheet Excel workbook of a scoped report (see services/reports.js). */
+/** Report tables (one per section) shared by the Excel and PDF exports. Columns: [header, key, Excel width, PDF weight, kind]. */
+function reportTables(report) {
+  const has = (k) => report.sections.includes(k);
+  const rate = (v) => (v === null || v === undefined ? '-' : v);
+  const t = [];
+  if (has('departments') && report.departments.length) {
+    t.push({
+      title: 'Departments',
+      columns: [['Department', 'name', 30, 3], ['Faculty', 'faculty_name', 30, 3], ['HoD', 'hod_name', 24, 2.2], ['Programmes', 'programs', 12, 1.3], ['Classes', 'classes', 10, 1], ['Students', 'students', 10, 1], ['Lecturers', 'lecturers', 10, 1], ['Units', 'allocations', 8, 0.8], ['Attendance %', 'attendance_rate', 14, 1.2, 'rate']],
+      rows: report.departments.map((d) => ({ ...d, attendance_rate: rate(d.attendance_rate) })),
+    });
+  }
+  if (has('workload')) {
+    t.push({
+      title: 'Lecturer workload',
+      columns: [['Lecturer', 'name', 28, 2.6], ['Department', 'department', 26, 2.4], ['Units', 'units', 8, 0.8], ['Allocated hrs/wk', 'allocated_hours', 16, 1.3], ['Scheduled hrs/wk', 'scheduled_hours', 16, 1.3], ['Min-max hrs/wk', 'limits', 14, 1.2], ['Internal part-time hrs/wk', 'part_time_hours', 18, 1.5], ['Load', 'status', 16, 1.5]],
+      rows: report.workload.map((w) => ({ ...w, limits: `${w.min_hours}-${w.max_hours}`, part_time_hours: w.part_time_hours || '' })),
+    });
+  }
+  if (has('course_attendance')) {
+    t.push({
+      title: 'Attendance by course unit',
+      columns: [['Code', 'code', 12, 1], ['Course unit', 'name', 34, 3], ['Classes', 'classes', 30, 2.6], ['Lecturer', 'lecturer', 24, 2], ['Lectures recorded', 'registers', 16, 1.1], ['Attendance %', 'rate', 14, 1.1, 'rate']],
+      rows: report.attendance.by_course.map((c) => ({ ...c, code: c.is_cross_cutting ? `${c.code} (CC)` : c.code, rate: rate(c.rate) })),
+    });
+  }
+  if (has('class_attendance')) {
+    t.push({
+      title: 'Attendance by class',
+      columns: [['Class', 'name', 28, 3], ['Programme', 'program', 14, 1.4], ['Students', 'students', 10, 1], ['Lectures recorded', 'registers', 16, 1.2], ['Attendance %', 'rate', 14, 1.2, 'rate']],
+      rows: report.attendance.by_class.map((c) => ({ ...c, rate: rate(c.rate) })),
+    });
+  }
+  if (has('at_risk')) {
+    t.push({
+      title: `Students at risk (below ${report.attendance.at_risk_threshold}%)`,
+      columns: [['Student', 'name', 28, 3], ['Reg. no', 'identifier', 16, 1.6], ['Class', 'class_name', 24, 2.4], ['Attended', 'attended', 10, 1], ['Lectures', 'total', 10, 1], ['Attendance %', 'rate', 14, 1.2, 'rate']],
+      rows: report.attendance.at_risk,
+      empty: 'No students below the threshold',
+    });
+  }
+  if (has('missed')) {
+    t.push({
+      title: `Lectures with no attendance (${report.missed.from || ''} to ${report.missed.to || ''})`,
+      columns: [['Date', 'date', 12, 1.1], ['Time', 'time', 13, 1.1], ['Code', 'course_code', 12, 1], ['Course unit', 'course_name', 32, 3], ['Classes', 'class_names', 28, 2.4], ['Lecturer', 'lecturer_name', 24, 2], ['Room', 'room_name', 14, 1.2]],
+      rows: report.missed.items.map((o) => ({ ...o, time: `${o.start_time}-${o.end_time}`, class_names: o.classes.map((c) => c.name).join(', ') })),
+      empty: 'Every lecture had attendance taken',
+    });
+  }
+  if (has('rooms') && report.rooms.length) {
+    t.push({
+      title: 'Room utilisation',
+      columns: [['Room', 'name', 20, 2], ['Building', 'building', 18, 2], ['Capacity', 'capacity', 10, 1], ['Booked hrs/wk', 'booked_hours', 14, 1.2], ['Utilisation %', 'utilisation', 14, 1.2]],
+      rows: report.rooms,
+    });
+  }
+  return t;
+}
+
+/** Headline figures for the summary sheet / page. */
+function reportSummary(report) {
+  const c = report.counts;
+  const a = report.attendance;
+  const al = report.allocation;
+  const lecturer = report.role === 'lecturer';
+  const rows = [];
+  if (report.sections.includes('summary')) {
+    if (['admin', 'dean'].includes(report.role)) rows.push(['Departments', c.departments]);
+    if (!lecturer) rows.push(['Programmes', c.programs]);
+    rows.push(['Classes', c.classes], ['Students', c.students]);
+    if (!lecturer) rows.push(['Lecturers', c.lecturers]);
+    rows.push(
+      ['Course units allocated', `${c.course_units_allocated} (${c.cross_cutting_allocated} cross-cutting)`],
+      ['Weekly teaching', `${c.weekly_teaching_hours} h in ${c.weekly_sessions} sessions`],
+      ['Average attendance', a.average_rate === null ? '-' : `${a.average_rate}%`],
+      ['Registers approved / awaiting / rejected', `${a.approved_registers} / ${a.pending_registers} / ${a.rejected_registers}`],
+      ['Students at risk', `${a.at_risk.length} below ${a.at_risk_threshold}%`],
+    );
+  }
+  if (report.sections.includes('allocation') && !lecturer) {
+    rows.push(['Cross-cutting units allocated', `${al.cross_cutting_allocated} of ${al.cross_cutting_pairs}`]);
+    rows.push(['Programme units allocated', `${al.other_allocated} of ${al.other_pairs}`]);
+  }
+  return rows;
+}
+
+const reportSubtitle = (report) => [report.scope, report.term?.name || 'All terms', ...report.filters.labels].join(' · ');
+
+/** Excel workbook of a scoped, filtered report (see services/reports.js): a summary sheet and one sheet per section. */
 export async function reportXlsx(university, report) {
   const wb = new ExcelJS.Workbook();
   const primary = hex(university.primary_color);
-  const sheet = (name, columns, rows) => {
-    const ws = wb.addWorksheet(name);
-    ws.columns = columns.map(([header, key, width]) => ({ header, key, width: width || 18 }));
-    rows.forEach((r) => ws.addRow(r));
-    ws.getRow(1).eachCell((cell) => {
+  const head = (row) =>
+    row.eachCell((cell) => {
       cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: `FF${primary}` } };
       cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
     });
-    return ws;
-  };
-  const summary = sheet('Summary', [['Metric', 'metric', 36], ['Value', 'value', 20]], [
-    { metric: 'University', value: university.name },
-    { metric: 'Scope', value: report.scope },
-    { metric: 'Term', value: report.term?.name || '-' },
-    ...Object.entries(report.counts).map(([k, v]) => ({ metric: k.replace(/_/g, ' '), value: v })),
-    { metric: 'Average attendance (%)', value: report.attendance.average_rate ?? '-' },
-    { metric: 'Registers pending approval', value: report.attendance.pending_registers },
-  ]);
-  summary.getColumn(1).font = { bold: true };
-  sheet('Lecturer workload', [['Lecturer', 'name', 28], ['Department', 'department', 26], ['Units', 'units', 8], ['Allocated hrs/wk', 'allocated_hours', 16], ['Scheduled hrs/wk', 'scheduled_hours', 16]], report.workload);
-  sheet('Course attendance', [['Code', 'code', 12], ['Course unit', 'name', 34], ['Classes', 'classes', 30], ['Lecturer', 'lecturer', 24], ['Lectures recorded', 'registers', 16], ['Attendance %', 'rate', 14]], report.attendance.by_course);
-  sheet('Class attendance', [['Class', 'name', 28], ['Programme', 'program', 14], ['Students', 'students', 10], ['Lectures recorded', 'registers', 16], ['Attendance %', 'rate', 14]], report.attendance.by_class);
-  sheet('Students at risk', [['Student', 'name', 28], ['Reg. no', 'identifier', 16], ['Class', 'class_name', 24], ['Attended', 'attended', 10], ['Lectures', 'total', 10], ['Attendance %', 'rate', 14]], report.attendance.at_risk);
-  sheet('Room utilisation', [['Room', 'name', 20], ['Building', 'building', 18], ['Capacity', 'capacity', 10], ['Booked hrs/wk', 'booked_hours', 14], ['Utilisation %', 'utilisation', 14]], report.rooms);
+  const summary = wb.addWorksheet('Summary');
+  summary.columns = [{ width: 40 }, { width: 70 }];
+  summary.addRow([university.name]).font = { bold: true, size: 13 };
+  summary.addRow(['Report', reportSubtitle(report)]);
+  summary.addRow(['Generated', localStamp(university)]);
+  summary.addRow([]);
+  for (const r of [2, 3]) summary.getRow(r).getCell(1).font = { bold: true };
+  const figures = reportSummary(report);
+  if (figures.length) {
+    head(summary.addRow(['Measure', 'Value']));
+    for (const [k, v] of figures) summary.addRow([k, v]);
+  }
+  const threshold = report.attendance.at_risk_threshold;
+  const used = new Set(['Summary']);
+  for (const table of reportTables(report)) {
+    let name = table.title.replace(/[\\/?*[\]:]/g, '').slice(0, 31);
+    while (used.has(name)) name = `${name.slice(0, 28)} ${used.size}`;
+    used.add(name);
+    const ws = wb.addWorksheet(name);
+    ws.columns = table.columns.map(([header, key, width]) => ({ header, key, width: width || 18 }));
+    head(ws.getRow(1));
+    ws.views = [{ state: 'frozen', ySplit: 1 }];
+    for (const row of table.rows) {
+      const added = ws.addRow(Object.fromEntries(table.columns.map(([, key]) => [key, row[key] ?? ''])));
+      table.columns.forEach(([, key, , , kind], i) => {
+        if (kind === 'rate' && typeof row[key] === 'number' && row[key] < threshold) added.getCell(i + 1).font = { color: { argb: 'FFB42318' }, bold: true };
+      });
+    }
+    if (table.rows.length) ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: table.columns.length } };
+    else ws.addRow([table.empty || 'Nothing to show for these filters']);
+  }
   return Buffer.from(await wb.xlsx.writeBuffer());
+}
+
+/** The same report as a landscape PDF: summary figures, then a table per section. */
+export function reportPdf(university, report) {
+  const primary = `#${hex(university.primary_color)}`;
+  const threshold = report.attendance.at_risk_threshold;
+  return pdfToBuffer((doc) => {
+    const left = doc.page.margins.left;
+    const width = doc.page.width - left - doc.page.margins.right;
+    const bottom = () => doc.page.height - doc.page.margins.bottom - 14;
+    let y = pdfHeader(doc, university, 'Report', reportSubtitle(report));
+    const ensure = (h) => {
+      if (y + h <= bottom()) return false;
+      doc.addPage();
+      y = doc.page.margins.top;
+      return true;
+    };
+    const figures = reportSummary(report);
+    if (figures.length) {
+      const per = 4;
+      const boxW = (width - (per - 1) * 8) / per;
+      figures.forEach(([k, v], i) => {
+        const col = i % per;
+        if (col === 0 && i) y += 44;
+        if (col === 0) ensure(40);
+        const x = left + col * (boxW + 8);
+        doc.roundedRect(x, y, boxW, 38, 4).fillAndStroke('#F7F8FA', '#E4E7EC');
+        doc.font('Helvetica').fontSize(7.5).fillColor('#667085').text(k, x + 8, y + 6, { width: boxW - 16, lineBreak: false, ellipsis: true });
+        doc.font('Helvetica-Bold').fontSize(11).fillColor('#101828').text(String(v), x + 8, y + 19, { width: boxW - 16, lineBreak: false, ellipsis: true });
+      });
+      y += 54;
+    }
+    for (const table of reportTables(report)) {
+      const total = table.columns.reduce((n, c) => n + c[3], 0);
+      const cols = table.columns.map((c) => ({ header: c[0], key: c[1], kind: c[4], w: (c[3] / total) * width }));
+      const drawHead = () => {
+        doc.rect(left, y, width, 17).fill(primary);
+        doc.font('Helvetica-Bold').fontSize(8).fillColor('#FFFFFF');
+        let x = left;
+        for (const c of cols) {
+          doc.text(c.header, x + 4, y + 5, { width: c.w - 8, height: 9, lineBreak: false, ellipsis: true });
+          x += c.w;
+        }
+        y += 19;
+      };
+      ensure(60);
+      doc.font('Helvetica-Bold').fontSize(11).fillColor('#101828').text(table.title, left, y, { lineBreak: false });
+      doc.font('Helvetica').fontSize(8).fillColor('#667085').text(`${table.rows.length} row${table.rows.length === 1 ? '' : 's'}`, left, y + 2, { width, align: 'right', lineBreak: false });
+      y += 17;
+      drawHead();
+      if (!table.rows.length) {
+        doc.font('Helvetica-Oblique').fontSize(8.5).fillColor('#667085').text(table.empty || 'Nothing to show for these filters', left + 4, y + 2, { lineBreak: false });
+        y += 18;
+      }
+      table.rows.forEach((row, i) => {
+        doc.font('Helvetica').fontSize(8);
+        const cells = cols.map((c) => String(row[c.key] ?? ''));
+        const h = Math.max(14, ...cells.map((text, k) => doc.heightOfString(text, { width: cols[k].w - 8 }) + 5));
+        if (ensure(h)) drawHead();
+        if (i % 2) doc.rect(left, y - 1, width, h).fill('#F7F8FA');
+        let x = left;
+        cells.forEach((text, k) => {
+          const low = cols[k].kind === 'rate' && typeof row[cols[k].key] === 'number' && row[cols[k].key] < threshold;
+          doc.font(low ? 'Helvetica-Bold' : 'Helvetica').fontSize(8).fillColor(low ? '#B42318' : '#222222').text(text, x + 4, y + 2, { width: cols[k].w - 8 });
+          x += cols[k].w;
+        });
+        y += h;
+      });
+      y += 14;
+    }
+    const range = doc.bufferedPageRange();
+    for (let i = range.start; i < range.start + range.count; i++) {
+      doc.switchToPage(i);
+      const keep = doc.page.margins.bottom;
+      doc.page.margins.bottom = 0;
+      doc.font('Helvetica').fontSize(7.5).fillColor('#98A2B3').text(`${university.name} · ${reportSubtitle(report)} · page ${i + 1} of ${range.count}`, left, doc.page.height - keep + 8, { width, align: 'center', lineBreak: false, ellipsis: true });
+      doc.page.margins.bottom = keep;
+    }
+  });
 }
 
 /** Payment schedule for part-time claims: one row per claim, plus every claimed lecture and task. */
@@ -919,7 +1098,7 @@ export function requisitionPdf(university, claim, lines, { lecturer, vote, voteB
         doc.moveTo(fx + 84, y + 12).lineTo(fx + fw - 6, y + 12).lineWidth(0.5).strokeColor('#98A2B3').dash(1, { space: 1.5 }).stroke().undash();
       };
       const half = width / 2;
-      const designation = lecturer?.employment_type === 'part_time' ? 'Part-time Lecturer' : 'Lecturer';
+      const designation = lecturer?.designation || (lecturer?.employment_type === 'part_time' ? 'Part-time Lecturer' : 'Lecturer');
       field('Name', [lecturer?.title, claim.lecturer_name].filter(Boolean).join(' '), left, half);
       field('Designation', designation, left + half, half);
       y += 18;

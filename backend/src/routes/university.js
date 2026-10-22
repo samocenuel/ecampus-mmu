@@ -40,6 +40,15 @@ export function validateUniversityFields(fields) {
   intIn('manual_mark_limit', 0, 100, 'Manual marks per term');
   intIn('correction_hours', 1, 720, 'Correction window (hours)');
   intIn('exam_min_attendance', 0, 100, 'Minimum attendance for exams (%)');
+  intIn('account_archive_days', 0, 365, 'Days deleted accounts stay archived');
+  for (const [k, label] of [['workload_min_hours', 'Minimum workload'], ['workload_max_hours', 'Maximum workload']]) {
+    if (out[k] === undefined) continue;
+    out[k] = Number(out[k]);
+    if (!(out[k] >= 0 && out[k] <= 60)) throw badRequest(`${label} must be hours per week (0 to 60)`);
+  }
+  if (out.workload_min_hours !== undefined && out.workload_max_hours !== undefined && out.workload_min_hours > out.workload_max_hours) {
+    throw badRequest('The minimum workload cannot be above the maximum');
+  }
   intIn('coursework_min_percent', 0, 100, 'Minimum coursework mark (%)');
   if (out.claims_require_checkin !== undefined) out.claims_require_checkin = out.claims_require_checkin ? 1 : 0;
   for (const [k, lim] of [['checkin_latitude', 90], ['checkin_longitude', 180]]) {
@@ -80,7 +89,7 @@ router.put('/', requireRole('admin'), (req, res) => {
     pick(req.body, [
       'name', 'short_name', 'address', 'email', 'phone', 'website', 'primary_color', 'timezone', 'currency',
       'checkin_latitude', 'checkin_longitude', 'checkin_radius_m', 'manual_mark_limit', 'correction_hours',
-      'exam_min_attendance', 'coursework_min_percent', 'claims_require_checkin',
+      'exam_min_attendance', 'coursework_min_percent', 'claims_require_checkin', 'account_archive_days', 'workload_min_hours', 'workload_max_hours',
       'teaching_days', 'day_start', 'day_end', 'lunch_start', 'lunch_end',
     ]),
   );

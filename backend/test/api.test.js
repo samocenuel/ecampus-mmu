@@ -277,15 +277,41 @@ describe('Account deletion and public pages', () => {
     const me = (await api('GET', '/api/auth/me', { token })).data.user;
     const wrong = await api('POST', '/api/auth/delete-account', { token, body: { password: 'nope' } });
     assert.equal(wrong.status, 400);
-    const ok = await api('POST', '/api/auth/delete-account', { token, body: { password: DEMO_PASSWORD } });
-    assert.equal(ok.status, 200);
+    // The request waits for the administrator; the person can still sign in until it is approved.
+    const ok = await api('POST', '/api/auth/delete-account', { token, body: { password: DEMO_PASSWORD, reason: 'Leaving the university' } });
+    assert.equal(ok.status, 201);
+    assert.equal(ok.data.request.status, 'pending');
+    assert.equal((await api('POST', '/api/auth/delete-account', { token, body: { password: DEMO_PASSWORD } })).status, 400); // one at a time
+    assert.equal((await api('GET', '/api/auth/me', { token })).status, 200);
+    const admin = await login('admin@demo.edu');
+    const queue = await api('GET', '/api/users/deletions/list', { token: admin });
+    const reqRow = queue.data.items.find((r) => r.user_id === me.id);
+    assert.equal(reqRow.status, 'pending');
+    assert.equal(queue.data.archive_days, 30);
+    // The HoD cannot approve; the administrator archives it.
+    assert.equal((await api('POST', `/api/users/deletions/${reqRow.id}/approve`, { token: await login('hod.cs@demo.edu') })).status, 403);
+    const approved = await api('POST', `/api/users/deletions/${reqRow.id}/approve`, { token: admin, body: { note: 'Confirmed with registry' } });
+    assert.equal(approved.data.status, 'archived');
+    assert.ok(approved.data.purge_after > new Date().toISOString().slice(0, 10));
+    const relogin = await api('POST', '/api/auth/login', { body: { email, password: DEMO_PASSWORD } });
+    assert.equal(relogin.status, 403);
+    assert.match(relogin.data.error, /archived for deletion/);
+    // Archived: the data is still there and can be restored.
+    assert.equal(q.get('SELECT name FROM users WHERE id = ?', me.id).name, me.name);
+    const restored = await api('POST', `/api/users/deletions/${reqRow.id}/restore`, { token: admin });
+    assert.equal(restored.data.status, 'restored');
+    assert.equal((await api('POST', '/api/auth/login', { body: { email, password: DEMO_PASSWORD } })).status, 200);
+    // Ask again, approve, and let the archive period pass: the scheduler erases the account.
+    const again = await api('POST', '/api/auth/delete-account', { token: await login(email), body: { password: DEMO_PASSWORD } });
+    await api('POST', `/api/users/deletions/${again.data.request.id}/approve`, { token: admin });
+    const { runAccountPurge } = await import('../src/services/people.js');
+    assert.equal(runAccountPurge(addDays(new Date().toISOString().slice(0, 10), 31)), 1);
     const row = q.get('SELECT name, email, phone, identifier, active FROM users WHERE id = ?', me.id);
     assert.deepEqual(row, { name: 'Deleted user', email: `deleted-${me.id}@deleted.invalid`, phone: null, identifier: null, active: 0 });
-    const relogin = await api('POST', '/api/auth/login', { body: { email, password: DEMO_PASSWORD } });
-    assert.equal(relogin.status, 401);
+    assert.equal(q.get('SELECT status FROM account_deletions WHERE id = ?', again.data.request.id).status, 'purged');
     // The shared demo administrator cannot be deleted (the last-admin rule is checked after this).
-    const admin = await api('POST', '/api/auth/delete-account', { token: await login('admin@demo.edu'), body: { password: DEMO_PASSWORD } });
-    assert.equal(admin.status, 403); // shared demo accounts cannot be deleted
+    const demoAdmin = await api('POST', '/api/auth/delete-account', { token: admin, body: { password: DEMO_PASSWORD } });
+    assert.equal(demoAdmin.status, 403); // shared demo accounts cannot be deleted
   });
 
   test('privacy policy and account deletion pages are public', async () => {
@@ -764,8 +790,16 @@ describe('Teaching operations, exams and profiles', async () => {
     assert.equal(first.data.user.must_change_password, true);
     const changed = await api('POST', '/api/auth/change-password', { token: first.data.token, body: { current_password: temp, new_password: 'MyOwnPass-2026' } });
     assert.equal(changed.data.user.must_change_password, false);
-    const prof = await api('PUT', '/api/auth/me', { token: first.data.token, body: { name: 'Dr. New Lecturer Updated', phone: '+256 700 000000' } });
+    // People keep their contacts up to date; the name and position are changed by the HoD / Dean.
+    const renamed = await api('PUT', '/api/auth/me', { token: first.data.token, body: { name: 'Dr. New Lecturer Updated' } });
+    assert.equal(renamed.status, 403);
+    const prof = await api('PUT', '/api/auth/me', {
+      token: first.data.token,
+      body: { phone: '+256 700 000000', alt_phone: '+256 780 111222', contact_email: 'me@personal.example', office: 'Block B, Room 12', emergency_name: 'Next of kin', emergency_phone: '+256 701 999999' },
+    });
     assert.equal(prof.data.user.phone, '+256 700 000000');
+    assert.equal(prof.data.user.office, 'Block B, Room 12');
+    assert.equal((await api('PUT', '/api/auth/me', { token: first.data.token, body: { contact_email: 'not-an-email' } })).status, 400);
     const png = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63f8ffff3f0005fe02fea7d6a90000000049454e44ae426082', 'hex');
     const form = new FormData();
     form.append('photo', new Blob([png], { type: 'image/png' }), 'me.png');
@@ -1106,5 +1140,118 @@ describe('Research: project, dissertation or thesis from concept to clearance', 
     assert.equal(dl.status, 200);
     assert.equal((await api('GET', `/api/research/documents/${doc.id}`, { token: await login('rep.bscs1@students.demo.edu') })).status, 404);
     assert.ok((await api('GET', '/api/research?view=supervising', { token: supervisor })).data.some((p) => p.id === id));
+  });
+});
+
+describe('Filtered reports, workload limits and internal part-time load', () => {
+  test('reports filter by department, year and sections, and export as PDF and Excel', async () => {
+    const admin = await login('admin@demo.edu');
+    const opts = (await api('GET', '/api/reports/options', { token: admin })).data;
+    const cs = opts.departments.find((d) => d.name === 'Computer Science');
+    assert.ok(opts.faculties.length >= 2 && opts.lecturers.length > 0 && opts.sections.missed);
+    const all = (await api('GET', '/api/reports/overview', { token: admin })).data;
+    const r = (await api('GET', `/api/reports/overview?department_id=${cs.id}&year_of_study=2&threshold=80&sections=summary,workload,at_risk`, { token: admin })).data;
+    assert.deepEqual(r.filters.labels, ['Department: Computer Science', 'Year 2', 'At risk below 80%']);
+    assert.deepEqual(r.sections, ['summary', 'workload', 'at_risk']);
+    assert.ok(r.counts.classes >= 1 && r.counts.classes < all.counts.classes);
+    assert.equal(r.attendance.at_risk_threshold, 80);
+    assert.ok(r.attendance.at_risk.every((s) => s.rate < 80));
+    assert.equal(r.rooms.length, 0); // not asked for
+    // Cross-cutting units taught to the class bring their lecturers from other departments.
+    assert.ok(r.workload.some((w) => w.department !== 'Computer Science'));
+    assert.ok(r.workload.every((w) => 'max_hours' in w && 'status' in w));
+
+    const pdf = await api('GET', `/api/reports/export?format=pdf&department_id=${cs.id}&year_of_study=2`, { token: admin });
+    assert.equal(pdf.status, 200);
+    assert.match(pdf.type, /pdf/);
+    assert.equal(pdf.data.subarray(0, 4).toString(), '%PDF');
+    const xlsx = await api('GET', `/api/reports/export?department_id=${cs.id}`, { token: admin });
+    assert.match(xlsx.type, /spreadsheetml/);
+    assert.equal(xlsx.data.subarray(0, 2).toString(), 'PK');
+
+    // A lecturer filters within their own teaching only.
+    const lec = await login('brian.kato@demo.edu');
+    const mine = (await api('GET', '/api/reports/options', { token: lec })).data;
+    assert.equal(mine.lecturers.length, 0);
+    assert.ok(mine.course_units.length > 0);
+    const one = (await api('GET', `/api/reports/overview?course_unit_id=${mine.course_units[0].id}`, { token: lec })).data;
+    assert.equal(one.attendance.by_course.length, 1);
+  });
+
+  test('allocating above the maximum load needs an override and becomes claimable internal part-time load', async () => {
+    const admin = await login('admin@demo.edu');
+    const hod = await login('hod.cs@demo.edu');
+    const brian = q.get("SELECT * FROM users WHERE email = 'brian.kato@demo.edu'");
+    const set = await api('PUT', '/api/university', { token: admin, body: { workload_min_hours: 2, workload_max_hours: 8 } });
+    assert.equal(set.status, 200);
+    // One of Brian's allocations with approved lectures (the current term may be a later one by now).
+    const target = q.get(
+      `SELECT a.* FROM allocations a WHERE a.lecturer_id = ? AND EXISTS (SELECT 1 FROM timetable_sessions s JOIN attendance_registers r ON r.session_id = s.id
+        WHERE s.allocation_id = a.id AND r.status = 'approved') ORDER BY a.hours_per_week LIMIT 1`,
+      brian.id,
+    );
+    const loads = (await api('GET', `/api/allocations/workloads?term_id=${target.term_id}`, { token: hod })).data;
+    assert.equal(loads.items.find((w) => w.id === brian.id).max, 8);
+    const others = q.get('SELECT COALESCE(SUM(hours_per_week), 0) AS h FROM allocations WHERE lecturer_id = ? AND term_id = ? AND id != ?', brian.id, target.term_id, target.id).h;
+    const newHours = 8 - others + 2; // two hours over the maximum
+    const blocked = await api('PUT', `/api/allocations/${target.id}`, { token: admin, body: { hours_per_week: newHours } });
+    assert.equal(blocked.status, 409);
+    assert.equal(blocked.data.code, 'WORKLOAD_OVER_MAX');
+    assert.equal(blocked.data.workload.excess, 2);
+    const over = await api('PUT', `/api/allocations/${target.id}`, { token: admin, body: { hours_per_week: newHours, override_workload: true } });
+    assert.equal(over.status, 200);
+    assert.equal(over.data.part_time_hours, 2);
+    assert.equal((await api('GET', `/api/allocations/workloads?term_id=${target.term_id}`, { token: hod })).data.items.find((w) => w.id === brian.id).status, 'over');
+
+    // Brian (full-time) can now claim the part-time share of that unit's lectures only.
+    const token = await login('brian.kato@demo.edu');
+    assert.equal((await api('GET', '/api/auth/me', { token })).data.user.internal_part_time, true);
+    const today = zonedNow('Africa/Kampala').date;
+    const preview = (await api('GET', `/api/claims/preview?from=${addDays(today, -60)}&to=${today}`, { token })).data;
+    const unit = q.get('SELECT code FROM course_units WHERE id = ?', target.course_unit_id).code;
+    assert.ok(preview.lectures.length > 0);
+    assert.ok(preview.lectures.every((l) => l.course_unit_code === unit));
+    assert.ok(preview.lectures.every((l) => Math.abs(l.internal_share - 2 / newHours) < 0.01));
+
+    // Restore the demo defaults for the other tests.
+    await api('PUT', `/api/allocations/${target.id}`, { token: admin, body: { hours_per_week: target.hours_per_week, override_workload: true } });
+    q.run('UPDATE allocations SET part_time_hours = 0 WHERE id = ?', target.id);
+    await api('PUT', '/api/university', { token: admin, body: { workload_min_hours: 10, workload_max_hours: 20 } });
+  });
+
+  test('a unit can be offered to full-time staff as an internal part-time call', async () => {
+    const admin = await login('admin@demo.edu');
+    const reqs = (await api('GET', '/api/allocations/requirements', { token: admin })).data;
+    const unit = [...reqs.cross_cutting, ...reqs.program_specific].find((u) => u.classes.some((c) => !c.allocation_id));
+    assert.ok(unit, 'the demo data has an unallocated unit');
+    const classIds = unit.classes.filter((c) => !c.allocation_id).map((c) => c.class_id);
+    const call = await api('POST', '/api/allocations/part-time-calls', { token: admin, body: { course_unit_id: unit.course_unit_id, class_ids: classIds, note: 'Evening slot' } });
+    assert.equal(call.status, 201);
+    assert.ok(call.data.notified > 0);
+    const deptId = call.data.department_id;
+    const volunteer = q.get("SELECT * FROM users WHERE department_id = ? AND role = 'lecturer' AND employment_type = 'full_time' AND active = 1 ORDER BY id LIMIT 1", deptId);
+    const vt = await login(volunteer.email);
+    const open = (await api('GET', '/api/allocations/part-time-calls', { token: vt })).data;
+    assert.ok(open.some((c) => c.id === call.data.id));
+    assert.equal((await api('POST', `/api/allocations/part-time-calls/${call.data.id}/respond`, { token: vt, body: { note: 'Happy to' } })).data.responded, true);
+    const seen = (await api('GET', '/api/allocations/part-time-calls', { token: admin })).data.find((c) => c.id === call.data.id);
+    assert.equal(seen.responses[0].user_id, volunteer.id);
+    assert.ok(seen.responses[0].workload);
+    const assigned = await api('POST', `/api/allocations/part-time-calls/${call.data.id}/assign`, { token: admin, body: { user_id: volunteer.id } });
+    assert.equal(assigned.status, 200);
+    assert.equal(assigned.data.call.status, 'filled');
+    assert.equal(assigned.data.allocation.part_time_hours, assigned.data.allocation.hours_per_week);
+    q.run('DELETE FROM allocations WHERE id = ?', assigned.data.allocation.id);
+  });
+
+  test('the HoD sets a lecturer position and personal workload limits', async () => {
+    const hod = await login('hod.cs@demo.edu');
+    const esther = q.get("SELECT * FROM users WHERE email = 'esther.atim@demo.edu'");
+    const res = await api('PUT', `/api/users/${esther.id}`, { token: hod, body: { designation: 'Assistant Lecturer', workload_max: 12 } });
+    assert.equal(res.status, 200);
+    assert.equal(res.data.designation, 'Assistant Lecturer');
+    assert.equal(res.data.workload_max, 12);
+    assert.equal((await api('PUT', `/api/users/${esther.id}`, { token: hod, body: { workload_min: 14, workload_max: 12 } })).status, 400);
+    await api('PUT', `/api/users/${esther.id}`, { token: hod, body: { designation: '', workload_max: '' } });
   });
 });

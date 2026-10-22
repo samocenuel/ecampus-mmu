@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../../core/api.dart';
 import '../../core/app_state.dart';
 import '../../widgets/common.dart';
 
@@ -75,17 +76,61 @@ class _AllocationScreenState extends State<AllocationScreen> {
       ),
     );
     if (go != true || !mounted) return;
-    try {
-      final res = await runWithConfirm(
-        context,
-        (force) => app.api.post('/api/allocations', {'course_unit_id': unit['course_unit_id'], 'lecturer_id': lecturerId, 'class_ids': selected.toList(), 'hours_per_week': hours, 'force': force}),
-      );
-      if (res != null && mounted) {
-        showMessage(context, '${unit['code']} allocated to ${res['lecturer_name']}');
-        setState(() => _version++);
+    var override = false;
+    while (true) {
+      if (!mounted) return;
+      try {
+        final res = await runWithConfirm(
+          context,
+          (force) => app.api.post('/api/allocations', {
+            'course_unit_id': unit['course_unit_id'],
+            'lecturer_id': lecturerId,
+            'class_ids': selected.toList(),
+            'hours_per_week': hours,
+            'force': force,
+            'override_workload': override,
+          }),
+        );
+        if (res != null && mounted) {
+          final pt = (res['part_time_hours'] as num?) ?? 0;
+          showMessage(context, '${unit['code']} allocated to ${res['lecturer_name']}${pt > 0 ? ' ($pt h a week internal part-time)' : ''}');
+          setState(() => _version++);
+        }
+        return;
+      } on ApiException catch (e) {
+        if (!mounted) return;
+        if (e.data['code'] != 'WORKLOAD_OVER_MAX') return showError(context, e);
+        // Above the lecturer's maximum: override (extra hours become internal part-time load) or call for part-timers.
+        final choice = await showDialog<String>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            icon: const Icon(Icons.warning_amber_rounded),
+            title: const Text('Above the maximum load'),
+            content: Text(e.message),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+              TextButton(onPressed: () => Navigator.pop(ctx, 'call'), child: const Text('Call part-timers')),
+              FilledButton(onPressed: () => Navigator.pop(ctx, 'override'), child: const Text('Override')),
+            ],
+          ),
+        );
+        if (choice == 'override') {
+          override = true;
+          continue;
+        }
+        if (choice == 'call' && mounted) {
+          try {
+            final call = await app.api.post('/api/allocations/part-time-calls', {'course_unit_id': unit['course_unit_id'], 'class_ids': selected.toList(), 'hours_per_week': hours}) as Map;
+            if (mounted) showMessage(context, 'Call sent to ${call['notified']} full-time staff');
+          } catch (err) {
+            if (mounted) showError(context, err);
+          }
+        }
+        return;
+      } catch (e) {
+        if (mounted) showError(context, e);
+        return;
       }
-    } catch (e) {
-      if (mounted) showError(context, e);
     }
   }
 

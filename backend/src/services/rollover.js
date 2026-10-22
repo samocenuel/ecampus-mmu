@@ -149,6 +149,7 @@ export function carryOverAllocations(uid, term) {
           course_unit_id: a.course_unit_id,
           lecturer_id: a.lecturer_id,
           hours_per_week: a.hours_per_week,
+          part_time_hours: a.part_time_hours || 0,
           notes: a.notes,
           status: 'draft',
           carried_from: a.id,

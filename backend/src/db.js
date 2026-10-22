@@ -319,6 +319,53 @@ CREATE INDEX IF NOT EXISTS idx_pay_events_claim ON pay_claim_events(claim_id);
 // academic calendar, leave with cover lecturers, exam timetables, coursework marks and budgets.
 // Research supervision: a student's project (undergraduate), dissertation (Master's) or thesis
 // (PhD) from concept to clearance, with every sign-off kept as an event.
+// Account deletion: requested by the person (or their HoD / Dean), approved by the university's
+// administrator, archived for a while (restorable) and then erased by the scheduler.
+// Internal part-time calls: a unit nobody can take within their maximum load is offered to
+// full-time staff as paid part-time load; interested lecturers respond and the HoD picks one.
+const PEOPLE_SCHEMA = `
+CREATE TABLE IF NOT EXISTS account_deletions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  university_id INTEGER NOT NULL REFERENCES universities(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  requested_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  reason TEXT,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','archived','rejected','cancelled','restored','purged')),
+  requested_at TEXT NOT NULL DEFAULT (datetime('now')),
+  decided_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  decided_at TEXT,
+  decision_note TEXT,
+  purge_after TEXT,
+  purged_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_account_deletions ON account_deletions(university_id, status);
+
+CREATE TABLE IF NOT EXISTS part_time_calls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  university_id INTEGER NOT NULL REFERENCES universities(id) ON DELETE CASCADE,
+  term_id INTEGER NOT NULL REFERENCES academic_terms(id) ON DELETE CASCADE,
+  course_unit_id INTEGER NOT NULL REFERENCES course_units(id) ON DELETE CASCADE,
+  class_ids TEXT NOT NULL,
+  hours_per_week REAL NOT NULL,
+  department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL,
+  note TEXT,
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','filled','closed')),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  allocation_id INTEGER REFERENCES allocations(id) ON DELETE SET NULL,
+  filled_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  closed_at TEXT
+);
+CREATE TABLE IF NOT EXISTS part_time_call_responses (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  call_id INTEGER NOT NULL REFERENCES part_time_calls(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  note TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (call_id, user_id)
+);
+`;
+
 const RESEARCH_SCHEMA = `
 CREATE TABLE IF NOT EXISTS research_coordinators (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -643,14 +690,36 @@ const ADDED_COLUMNS = {
     claims_require_checkin: 'INTEGER NOT NULL DEFAULT 0',
     // The academic year classes are in; when a later year's Semester 1 starts, classes move up.
     progressed_year: 'TEXT',
+    // Approved account deletions are archived this many days before personal data is erased.
+    account_archive_days: 'INTEGER NOT NULL DEFAULT 30',
+    // Weekly teaching load for full-time staff; above the maximum needs an override (internal part-time load).
+    workload_min_hours: 'REAL NOT NULL DEFAULT 10',
+    workload_max_hours: 'REAL NOT NULL DEFAULT 20',
   },
-  users: { calendar_token: 'TEXT', must_change_password: 'INTEGER NOT NULL DEFAULT 0', photo_path: 'TEXT' },
+  users: {
+    calendar_token: 'TEXT',
+    must_change_password: 'INTEGER NOT NULL DEFAULT 0',
+    photo_path: 'TEXT',
+    // Position (e.g. Senior Lecturer); set by the HoD, Dean or administrator, like the name.
+    designation: 'TEXT',
+    // Contacts the person keeps up to date themselves.
+    alt_phone: 'TEXT',
+    contact_email: 'TEXT',
+    office: 'TEXT',
+    address: 'TEXT',
+    emergency_name: 'TEXT',
+    emergency_phone: 'TEXT',
+    // Personal workload limits (hours per week) replacing the university's defaults.
+    workload_min: 'REAL',
+    workload_max: 'REAL',
+  },
   pay_claims: { vote_id: 'INTEGER', verify_code: 'TEXT' },
   notification_prefs: { research_enabled: 'INTEGER NOT NULL DEFAULT 1', research_day_before: 'INTEGER NOT NULL DEFAULT 1', research_minutes_before: 'INTEGER NOT NULL DEFAULT 60' },
   // Research: the HoD turns it on per programme, says from which year of study, and how many progress reports.
   programs: { coursework_max: 'REAL NOT NULL DEFAULT 40', research_enabled: 'INTEGER NOT NULL DEFAULT 0', research_year: 'INTEGER', research_reports: 'INTEGER NOT NULL DEFAULT 3' },
   classes: { curriculum_version_id: 'INTEGER', status: "TEXT NOT NULL DEFAULT 'active'", completed_at: 'TEXT', intake_year: 'TEXT' },
-  allocations: { status: "TEXT NOT NULL DEFAULT 'confirmed'", carried_from: 'INTEGER' },
+  // part_time_hours: hours a week above the lecturer's maximum, paid as internal part-time load.
+  allocations: { status: "TEXT NOT NULL DEFAULT 'confirmed'", carried_from: 'INTEGER', part_time_hours: 'REAL NOT NULL DEFAULT 0' },
   academic_terms: { carried_over_at: 'TEXT' },
   attendance_registers: { source: "TEXT NOT NULL DEFAULT 'rep'", self_checkins: 'INTEGER NOT NULL DEFAULT 0' },
   attendance_records: { method: 'TEXT' },
@@ -776,6 +845,7 @@ migrate();
 db.exec(PAY_SCHEMA);
 db.exec(OPS_SCHEMA);
 db.exec(RESEARCH_SCHEMA);
+db.exec(PEOPLE_SCHEMA);
 addColumns();
 migrateCurriculumVersions();
 

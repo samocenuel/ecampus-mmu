@@ -2,6 +2,7 @@
 // lecturer -> HoD -> Dean -> HR (Directorate) -> paid.
 import { q } from '../db.js';
 import { canManageDepartment, facultyIdsForDean, placeholders } from '../scope.js';
+import { hasInternalPartTime } from './workload.js';
 import { toMinutes } from '../util.js';
 
 /** Where a claim is and who acts next. `next` is the status an approval moves it to. */
@@ -22,7 +23,9 @@ export const EDITABLE_STATUSES = ['draft', 'rejected'];
 
 export const round2 = (n) => Math.round(Number(n || 0) * 100) / 100;
 
-export const isPartTimer = (user) => user.employment_type === 'part_time' && ['lecturer', 'hod', 'dean'].includes(user.role);
+/** Part-time lecturers, and full-time staff with internal part-time load (hours above their maximum). */
+export const isPartTimer = (user) =>
+  ['lecturer', 'hod', 'dean'].includes(user.role) && (user.employment_type === 'part_time' || hasInternalPartTime(user.id));
 
 /** Programme levels a rate can apply to (programmes.level uses the same names). */
 export const PROGRAM_LEVELS = ['Short course', 'Certificate', 'Diploma', 'Bachelor', 'Postgraduate Diploma', 'Masters', 'PhD'];
@@ -56,11 +59,13 @@ const APPROVED_COVER = `SELECT 1 FROM leave_covers lc JOIN leave_requests lr ON 
  * once, with every class's headcount and the number of students who confirmed it by QR check-in.
  */
 export function claimableLectures(lecturerId, from, to, exceptClaimId = 0) {
-  const uni = q.get('SELECT un.claims_require_checkin FROM users u JOIN universities un ON un.id = u.university_id WHERE u.id = ?', lecturerId);
+  const uni = q.get('SELECT un.claims_require_checkin, u.employment_type FROM users u JOIN universities un ON un.id = u.university_id WHERE u.id = ?', lecturerId);
+  // Full-time staff are paid only for internal part-time load: their own allocations' hours above the maximum.
+  const internal = uni?.employment_type !== 'part_time';
   const rows = q.all(
     `SELECT s.id AS session_id, r.lecture_date AS work_date,
             COALESCE(MAX(sc.new_start), s.start_time) AS start_time, COALESCE(MAX(sc.new_end), s.end_time) AS end_time,
-            cu.code AS course_unit_code, cu.name AS course_unit_name,
+            cu.code AS course_unit_code, cu.name AS course_unit_name, a.hours_per_week, a.part_time_hours,
             GROUP_CONCAT(c.name, ', ') AS class_names, GROUP_CONCAT(DISTINCT p.level) AS levels,
             SUM((SELECT COUNT(*) FROM attendance_records ar WHERE ar.register_id = r.id AND ar.present = 1)) AS students_present,
             SUM((SELECT COUNT(*) FROM attendance_records ar WHERE ar.register_id = r.id)) AS students_total,
@@ -75,6 +80,7 @@ export function claimableLectures(lecturerId, from, to, exceptClaimId = 0) {
        LEFT JOIN session_changes sc ON sc.session_id = s.id AND sc.action = 'move' AND sc.new_date = r.lecture_date
       WHERE r.status = 'approved' AND r.lecture_date BETWEEN ? AND ?
         AND ((a.lecturer_id = ? AND NOT EXISTS (${APPROVED_COVER})) OR EXISTS (${APPROVED_COVER} AND lc.substitute_id = ?))
+        ${internal ? 'AND a.part_time_hours > 0 AND a.lecturer_id = ? ' : ''}
         AND NOT EXISTS (SELECT 1 FROM pay_claim_lines l WHERE l.kind = 'teaching' AND l.session_id = s.id
                           AND l.work_date = r.lecture_date AND l.claim_id <> ?)
       GROUP BY s.id, r.lecture_date
@@ -83,11 +89,17 @@ export function claimableLectures(lecturerId, from, to, exceptClaimId = 0) {
     to,
     lecturerId,
     lecturerId,
+    ...(internal ? [lecturerId] : []),
     exceptClaimId,
   );
   return rows
     .filter((r) => !uni?.claims_require_checkin || r.self_checkins > 0)
-    .map((r) => ({ ...r, levels: r.levels ? r.levels.split(',') : [], hours: round2((toMinutes(r.end_time) - toMinutes(r.start_time)) / 60) }));
+    .map((r) => {
+      const full = (toMinutes(r.end_time) - toMinutes(r.start_time)) / 60;
+      // Internal part-time: the share of each lecture that is above the maximum load.
+      const share = internal ? Math.min(1, r.part_time_hours / (r.hours_per_week || r.part_time_hours)) : 1;
+      return { ...r, levels: r.levels ? r.levels.split(',') : [], hours: round2(full * share), internal_share: internal ? round2(share) : null };
+    });
 }
 
 /** The faculty's rate used for invigilation duties (marked by the Dean), if any. */

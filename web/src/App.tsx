@@ -22,6 +22,7 @@ import Profile from './pages/Profile';
 import Register from './pages/Register';
 import Reports from './pages/Reports';
 import Research, { ResearchDetail } from './pages/Research';
+import PartTimeCalls from './pages/PartTimeCalls';
 import Timetable from './pages/Timetable';
 import Users from './pages/Users';
 import Verify from './pages/Verify';
@@ -88,6 +89,7 @@ export default function App() {
               <Route path="checkin/:id" element={<Only roles={MEMBERS}><CheckIn /></Only>} />
               <Route path="exams" element={<Only roles={MEMBERS}><Exams /></Only>} />
               <Route path="leave" element={<Only roles={STAFF}><Leave /></Only>} />
+              <Route path="part-time-calls" element={<Only roles={STAFF}><PartTimeCalls /></Only>} />
               <Route path="research" element={<Only roles={MEMBERS}><Research /></Only>} />
               <Route path="research/:id" element={<Only roles={MEMBERS}><ResearchDetail /></Only>} />
               <Route path="leave/:id" element={<Only roles={STAFF}><LeaveDetail /></Only>} />

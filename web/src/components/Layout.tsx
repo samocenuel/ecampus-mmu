@@ -2,7 +2,7 @@ import { ReactNode, useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   Bell, BookOpen, Building2, CalendarClock, CalendarDays, ChartColumn, ClipboardCheck, DoorOpen, GraduationCap,
-  CalendarRange, CalendarX2, FilePenLine, KeyRound, Landmark, Layers, LayoutDashboard, LogOut, Menu, Microscope, Network, School, Settings, UserCog, Users, Wallet,
+  CalendarRange, CalendarX2, FilePenLine, KeyRound, Landmark, Layers, LayoutDashboard, LogOut, Megaphone, Menu, Microscope, Network, School, Settings, UserCog, Users, Wallet,
   Workflow, X,
 } from 'lucide-react';
 import { api, assetUrl } from '../api';
@@ -33,6 +33,7 @@ const NAV: { section: string; items: NavItem[] }[] = [
     section: 'Teaching',
     items: [
       { to: '/allocation', label: 'Load allocation', icon: <Workflow size={18} />, roles: ['admin', 'dean', 'hod'] },
+      { to: '/part-time-calls', label: 'Part-time calls', icon: <Megaphone size={18} />, roles: ['admin', 'dean', 'hod', 'lecturer'], show: (u) => u.role !== 'lecturer' || u.employment_type !== 'part_time' },
       { to: '/timetable', label: 'Timetable', icon: <CalendarClock size={18} />, roles: ['admin', 'dean', 'hod', 'lecturer'] },
       { to: '/reports', label: 'Reports', icon: <ChartColumn size={18} />, roles: ['admin', 'dean', 'hod', 'lecturer'] },
       { to: '/exams', label: 'Exams', icon: <FilePenLine size={18} />, roles: ['admin', 'dean', 'hod', 'lecturer', 'student'] },
@@ -47,7 +48,7 @@ const NAV: { section: string; items: NavItem[] }[] = [
         to: '/claims',
         label: 'Pay claims',
         icon: <Wallet size={18} />,
-        show: (u) => ['admin', 'dean', 'hod', 'hr'].includes(u.role) || u.employment_type === 'part_time',
+        show: (u) => ['admin', 'dean', 'hod', 'hr'].includes(u.role) || u.employment_type === 'part_time' || Boolean(u.internal_part_time),
       },
     ],
   },

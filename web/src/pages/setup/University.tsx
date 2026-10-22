@@ -162,6 +162,19 @@ export default function UniversitySettings() {
               onChange={(v) => setForm({ ...form, claims_require_checkin: v ? 1 : 0 })}
             />
           </Card>
+          <Card title="Workload and accounts">
+            <div className="form-grid">
+              <Field label="Minimum teaching load (hours/week)" help="For full-time staff; HoDs and Deans can set personal limits in Users">
+                <Input type="number" min={0} max={60} step={0.5} {...set('workload_min_hours')} />
+              </Field>
+              <Field label="Maximum teaching load (hours/week)" help="Above it, allocation needs an override and the extra hours are paid as internal part-time load">
+                <Input type="number" min={0} max={60} step={0.5} {...set('workload_max_hours')} />
+              </Field>
+              <Field label="Keep deleted accounts archived for (days)" help="Approved deletions can be restored during this time, then personal details are erased">
+                <Input type="number" min={0} max={365} {...set('account_archive_days')} />
+              </Field>
+            </div>
+          </Card>
         </div>
       </div>
     </form>

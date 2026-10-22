@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken';
 import { config } from './config.js';
 import { q } from './db.js';
 import { isProtectedDemoAccount } from './demo.js';
+import { hasInternalPartTime } from './services/workload.js';
 import { HttpError, forbidden } from './util.js';
 
 export const ROLES = ['super_admin', 'admin', 'dean', 'hod', 'lecturer', 'student', 'hr'];
@@ -34,6 +35,7 @@ export function loadUser(id) {
   if (!user) return undefined;
   delete user.password_hash;
   user.photo_url = user.photo_path ? `/uploads/${user.photo_path}` : null;
+  user.internal_part_time = user.employment_type === 'full_time' && hasInternalPartTime(user.id);
   // The shared demo accounts sign in without a password, so they are never asked to change it.
   user.must_change_password = Boolean(user.must_change_password) && !isProtectedDemoAccount(user);
   const repClasses = q.all('SELECT id, name FROM classes WHERE class_rep_id = ?', id);

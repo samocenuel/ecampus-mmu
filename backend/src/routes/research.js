@@ -1,4 +1,4 @@
-// Research supervision: projects (undergraduate), dissertations (Master's) and theses (PhD) from
+// Research supervision: Project (undergraduate), Dissertation (Master's) and Thesis (PhD) from
 // concept to clearance. See services/research.js for the stages and who acts at each.
 import fs from 'node:fs';
 import { Router } from 'express';

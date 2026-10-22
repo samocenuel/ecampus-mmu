@@ -10,7 +10,18 @@ export interface User {
   photo_url?: string | null;
   must_change_password?: boolean;
   title?: string | null;
+  designation?: string | null;
   phone?: string | null;
+  alt_phone?: string | null;
+  contact_email?: string | null;
+  office?: string | null;
+  address?: string | null;
+  emergency_name?: string | null;
+  emergency_phone?: string | null;
+  workload_min?: number | null;
+  workload_max?: number | null;
+  /** Full-time staff with hours above their maximum load, claimable as part-time pay. */
+  internal_part_time?: boolean;
   identifier?: string | null;
   faculty_id?: number | null;
   department_id?: number | null;

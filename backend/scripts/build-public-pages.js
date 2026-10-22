@@ -5,9 +5,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-process.env.APP_NAME ||= 'eCampus MMU';
+process.env.APP_NAME ||= 'eCampus';
 process.env.SUPPORT_EMAIL ||= 'samuel.ocen@mmu.ac.ug';
-const WEB_URL = process.env.WEB_URL || 'https://ecampus-mmu.onrender.com/';
+const WEB_URL = process.env.WEB_URL || 'https://www.studio13developers.com/ecampus/';
 
 const { privacyPage, deletionPage } = await import('../src/routes/public-pages.js');
 const docs = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'docs');

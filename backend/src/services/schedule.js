@@ -7,6 +7,7 @@ import { notify } from './notify.js';
 import { localToUtc, occurrences, occurrencesForUser } from './occurrences.js';
 import { runMissedLectureAlerts } from './ops.js';
 import { researchEventsFor, participantsOf } from './research.js';
+import { runAccountPurge } from './people.js';
 import { rolloverAll } from './rollover.js';
 import { listSessions } from './timetable.js';
 
@@ -153,6 +154,14 @@ export function startReminderLoop() {
     // Terms follow their dates, classes move up at the start of a new academic year, and each
     // semester's allocations are drafted from last year (checked at start-up, then hourly).
     if (ticks % 60 === 0) rolloverAll();
+    // Archived accounts are erased once their archive period ends (checked hourly).
+    if (ticks % 60 === 0) {
+      try {
+        runAccountPurge();
+      } catch (err) {
+        console.error('[account purge]', err);
+      }
+    }
     try {
       runResearchReminders();
     } catch (err) {

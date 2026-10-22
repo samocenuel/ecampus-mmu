@@ -68,25 +68,34 @@ class _ProfileScreenState extends State<ProfileScreen> {
     }
   }
 
-  Future<void> _editDetails() async {
+  static const _contacts = [
+    ('phone', 'Phone', TextInputType.phone),
+    ('alt_phone', 'Other phone', TextInputType.phone),
+    ('contact_email', 'Contact email', TextInputType.emailAddress),
+    ('office', 'Office / location', TextInputType.text),
+    ('address', 'Address', TextInputType.streetAddress),
+    ('emergency_name', 'Emergency contact name', TextInputType.name),
+    ('emergency_phone', 'Emergency contact phone', TextInputType.phone),
+  ];
+
+  /// People update their own contacts; the name, title and position are kept by the HoD / Dean.
+  Future<void> _editContacts() async {
     final app = context.read<AppState>();
     final u = app.user!;
-    final name = TextEditingController(text: u['name'] as String? ?? '');
-    final title = TextEditingController(text: u['title'] as String? ?? '');
-    final phone = TextEditingController(text: u['phone'] as String? ?? '');
+    final c = {for (final (k, _, _) in _contacts) k: TextEditingController(text: u[k] as String? ?? '')};
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Edit my details'),
-        content: Column(mainAxisSize: MainAxisSize.min, children: [
-          if (u['role'] != 'student') ...[
-            TextField(controller: title, decoration: const InputDecoration(labelText: 'Title (Dr., Mr., Ms....)')),
-            const SizedBox(height: 10),
-          ],
-          TextField(controller: name, decoration: const InputDecoration(labelText: 'Full name')),
-          const SizedBox(height: 10),
-          TextField(controller: phone, keyboardType: TextInputType.phone, decoration: const InputDecoration(labelText: 'Phone')),
-        ]),
+        title: const Text('My contacts'),
+        content: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            for (final (k, label, type) in _contacts)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: TextField(controller: c[k], keyboardType: type, maxLines: k == 'address' ? 2 : 1, decoration: InputDecoration(labelText: label)),
+              ),
+          ]),
+        ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
           FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Save')),
@@ -95,44 +104,60 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
     if (ok != true || !mounted) return;
     try {
-      final res = await app.api.put('/api/auth/me', {'name': name.text.trim(), 'title': title.text.trim(), 'phone': phone.text.trim()}) as Map<String, dynamic>;
+      final res = await app.api.put('/api/auth/me', {for (final e in c.entries) e.key: e.value.text.trim()}) as Map<String, dynamic>;
       app.setUser(res['user'] as Map<String, dynamic>);
-      if (mounted) showMessage(context, 'Details saved');
+      if (mounted) showMessage(context, 'Contacts saved');
     } catch (e) {
       if (mounted) showError(context, e);
     }
   }
 
-  Future<void> _deleteAccount() async {
+  int _deletionVersion = 0;
+
+  /// Deletion is a request the systems administrator approves; the account is then archived before it is erased.
+  Future<void> _deleteAccount(int archiveDays) async {
     final password = TextEditingController();
+    final reason = TextEditingController();
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         icon: Icon(Icons.warning_amber_rounded, color: Theme.of(ctx).colorScheme.error),
-        title: const Text('Delete your account?'),
-        content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Text('Your name, email, phone and other personal details are erased and you will be signed out. '
-              'Anonymised attendance records are kept for your university. This cannot be undone.'),
-          const SizedBox(height: 12),
-          TextField(controller: password, obscureText: true, decoration: const InputDecoration(labelText: 'Confirm with your password')),
-        ]),
+        title: const Text('Ask to delete your account?'),
+        content: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('Your systems administrator approves the request. You then can no longer sign in, and after $archiveDays days your name, email, phone numbers and other personal details are erased. '
+                'Anonymised attendance records are kept for your university.'),
+            const SizedBox(height: 12),
+            TextField(controller: reason, maxLines: 2, decoration: const InputDecoration(labelText: 'Reason (optional)')),
+            const SizedBox(height: 8),
+            TextField(controller: password, obscureText: true, decoration: const InputDecoration(labelText: 'Confirm with your password')),
+          ]),
+        ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
           FilledButton(
             style: FilledButton.styleFrom(backgroundColor: Theme.of(ctx).colorScheme.error),
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Delete account'),
+            child: const Text('Send request'),
           ),
         ],
       ),
     );
     if (confirmed != true || !mounted) return;
-    final app = context.read<AppState>();
     try {
-      await app.api.post('/api/auth/delete-account', {'password': password.text});
-      if (!mounted) return;
-      Navigator.of(context).popUntil((r) => r.isFirst);
-      await app.logout();
+      await context.read<AppState>().api.post('/api/auth/delete-account', {'password': password.text, 'reason': reason.text});
+      if (mounted) showMessage(context, 'Request sent to your systems administrator');
+      setState(() => _deletionVersion++);
+    } catch (e) {
+      if (mounted) showError(context, e);
+    }
+  }
+
+  Future<void> _withdrawDeletion() async {
+    try {
+      await context.read<AppState>().api.delete('/api/auth/delete-account');
+      if (mounted) showMessage(context, 'Deletion request withdrawn');
+      setState(() => _deletionVersion++);
     } catch (e) {
       if (mounted) showError(context, e);
     }
@@ -166,10 +191,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
         const SizedBox(height: 8),
         SectionCard(
           title: '${u['title'] ?? ''} ${u['name']}'.trim(),
-          trailing: IconButton(tooltip: 'Edit', icon: const Icon(Icons.edit_outlined), onPressed: _editDetails),
           child: Column(children: [
+            if (u['role'] != 'student') row('Position', u['designation']),
             row('Email', u['email']),
-            row('Phone', u['phone']),
             row('Role', roleLabels[u['role']]),
             row(u['role'] == 'student' ? 'Registration no.' : 'Staff no.', u['identifier']),
             row('Faculty', u['faculty_name']),
@@ -178,19 +202,48 @@ class _ProfileScreenState extends State<ProfileScreen> {
             if (u['is_class_rep'] == true) row('Class representative for', (u['rep_classes'] as List).map((c) => c['name']).join(', ')),
           ]),
         ),
+        SectionCard(
+          title: 'My contacts',
+          trailing: IconButton(tooltip: 'Edit contacts', icon: const Icon(Icons.edit_outlined), onPressed: _editContacts),
+          child: Column(children: [
+            for (final (k, label, _) in _contacts) row(label, u[k]),
+            if (_contacts.every((c) => (u[c.$1] as String? ?? '').isEmpty)) const Text('Add your phone numbers, office and an emergency contact.'),
+            const SizedBox(height: 6),
+            Text(
+              'Your name, title and position are updated by ${const {'hod': 'your Dean or the administrator', 'dean': 'the administrator', 'admin': 'another administrator', 'hr': 'the administrator'}[u['role']] ?? 'your HoD or Dean'}.',
+              style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant, fontSize: 12),
+            ),
+          ]),
+        ),
         const SectionCard(title: 'Change password', child: ChangePasswordForm()),
         SectionCard(
           title: 'Delete account',
-          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-            const Text('Permanently erase your personal details and sign out.'),
-            const SizedBox(height: 10),
-            OutlinedButton.icon(
-              style: OutlinedButton.styleFrom(foregroundColor: Theme.of(context).colorScheme.error),
-              onPressed: _deleteAccount,
-              icon: const Icon(Icons.delete_forever_outlined),
-              label: const Text('Delete my account'),
-            ),
-          ]),
+          child: AsyncView<Map<String, dynamic>>(
+            key: ValueKey(_deletionVersion),
+            load: () async => await app.api.get('/api/auth/delete-account') as Map<String, dynamic>,
+            builder: (context, d, _) {
+              final r = d['request'] as Map?;
+              final days = (d['archive_days'] as num?)?.toInt() ?? 30;
+              if (r?['status'] == 'pending') {
+                return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                  const Text('You asked to delete your account. Your systems administrator has not decided yet.'),
+                  const SizedBox(height: 10),
+                  OutlinedButton(onPressed: _withdrawDeletion, child: const Text('Withdraw the request')),
+                ]);
+              }
+              return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                Text('Ask for your account to be deleted. After your systems administrator approves, it is archived for $days days (it can still be restored), then your personal details are erased.'),
+                if (r?['status'] == 'rejected') Padding(padding: const EdgeInsets.only(top: 6), child: Text('Your last request was not approved: ${r?['decision_note'] ?? ''}')),
+                const SizedBox(height: 10),
+                OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(foregroundColor: Theme.of(context).colorScheme.error),
+                  onPressed: () => _deleteAccount(days),
+                  icon: const Icon(Icons.delete_forever_outlined),
+                  label: const Text('Delete my account'),
+                ),
+              ]);
+            },
+          ),
         ),
       ]),
     );

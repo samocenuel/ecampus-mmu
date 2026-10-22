@@ -289,6 +289,9 @@ RSpec usersSpec(AppState app, String group) {
     fields: [
       FSpec('role', 'Role', type: FType.select, required: true, options: [for (final r in allowed) (r, roleLabels[r]!)], defaultValue: allowed.isEmpty ? null : allowed.last),
       FSpec('title', 'Title (Dr., Prof., Mr., Ms.)', showIf: (f) => f['role'] != 'student'),
+      FSpec('designation', 'Position', showIf: (f) => f['role'] != 'student'),
+      FSpec('workload_min', 'Minimum load (hours/week)', type: FType.number, showIf: (f) => ['lecturer', 'hod', 'dean'].contains(f['role']), help: 'Leave empty for the university default'),
+      FSpec('workload_max', 'Maximum load (hours/week)', type: FType.number, showIf: (f) => ['lecturer', 'hod', 'dean'].contains(f['role']), help: 'Above it, extra hours are paid as internal part-time load'),
       const FSpec('name', 'Full name', required: true),
       const FSpec('email', 'Email', type: FType.email, required: true),
       const FSpec('phone', 'Phone'),
@@ -300,7 +303,7 @@ RSpec usersSpec(AppState app, String group) {
       // Editing never changes the password: use "Reset password" on the account instead.
       FSpec('password', 'Password (blank = generate temporary)', type: FType.password, showIf: (f) => f['id'] == null),
     ],
-    fromRow: (r) => {'id': r['id'], for (final k in ['role', 'employment_type', 'title', 'name', 'email', 'phone', 'identifier', 'faculty_id', 'department_id', 'class_id']) k: r[k]},
+    fromRow: (r) => {'id': r['id'], for (final k in ['role', 'employment_type', 'title', 'designation', 'workload_min', 'workload_max', 'name', 'email', 'phone', 'identifier', 'faculty_id', 'department_id', 'class_id']) k: r[k]},
     toPayload: (f, creating) {
       final body = Map<String, dynamic>.from(f)..remove('id');
       for (final k in ['faculty_id', 'department_id', 'class_id']) {

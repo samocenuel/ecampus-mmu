@@ -11,6 +11,7 @@ import 'manage/university_screen.dart';
 import 'claims_screen.dart';
 import 'exams_screen.dart';
 import 'leave_screen.dart';
+import 'part_time_calls_screen.dart';
 import 'lectures_screen.dart';
 import 'profile_screen.dart';
 import 'reports_screen.dart';
@@ -56,6 +57,7 @@ class MoreScreen extends StatelessWidget {
         ],
         if (app.isStudent || app.isStaff) tile(Icons.assignment_outlined, 'Exams', () => open(const ExamsScreen()), subtitle: app.isStudent ? 'Timetable and whether you qualify' : 'Invigilation and eligibility'),
         if (app.isStudent || app.teaches || app.isManager) tile(Icons.science_outlined, 'Research', () => open(const ResearchScreen()), subtitle: app.isStudent ? 'Project, dissertation or thesis' : 'Concepts, supervision, defences'),
+        if ((app.teaches && !app.isPartTimerByContract) || app.isManager) tile(Icons.campaign_outlined, 'Part-time calls', () => open(const PartTimeCallsScreen()), subtitle: app.isManager ? 'Offer units as internal part-time load' : 'Extra teaching paid as part-time'),
         if (app.teaches || app.isManager) tile(Icons.beach_access_outlined, 'Leave', () => open(const LeaveScreen()), subtitle: app.isManager ? 'Requests, checks and cover' : 'Request short-term leave'),
         if (app.isStaff) ...[
           header('Teaching'),

@@ -3,50 +3,94 @@ import { Camera, GraduationCap, KeyRound, LogOut, Trash2 } from 'lucide-react';
 import { api, assetUrl } from '../api';
 import { useAuth } from '../auth';
 import { useFeedback } from '../components/feedback';
-import { Alert, Avatar, Button, Card, Field, Input, Modal, PageHeader } from '../components/ui';
+import { Alert, Avatar, Button, Card, Field, Input, Modal, PageHeader, Textarea } from '../components/ui';
+import { useFetch } from '../hooks';
 import { ROLE_LABELS } from '../types';
 
+const niceDateTime = (d?: string | null) => (d ? new Date(d.replace(' ', 'T') + (d.includes('Z') ? '' : 'Z')).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : '');
+
+/** Deletion is a request: the systems administrator approves it, then the account is archived before it is erased. */
 function DeleteAccount() {
-  const { logout } = useAuth();
-  const { fail } = useFeedback();
+  const { toast, fail } = useFeedback();
+  const { data, reload } = useFetch<{ request: any; archive_days: number }>('/api/auth/delete-account');
   const [open, setOpen] = useState(false);
   const [password, setPassword] = useState('');
+  const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
+  const pending = data?.request?.status === 'pending' ? data.request : null;
+  const days = data?.archive_days ?? 30;
   const run = async () => {
     setBusy(true);
     try {
-      await api('/api/auth/delete-account', { method: 'POST', body: { password } });
-      logout();
+      await api('/api/auth/delete-account', { method: 'POST', body: { password, reason } });
+      toast('Request sent to your systems administrator');
+      setOpen(false);
+      setPassword('');
+      reload();
     } catch (err) {
       fail(err);
     } finally {
       setBusy(false);
     }
   };
+  const withdraw = async () => {
+    try {
+      await api('/api/auth/delete-account', { method: 'DELETE' });
+      toast('Deletion request withdrawn');
+      reload();
+    } catch (err) {
+      fail(err);
+    }
+  };
   return (
     <Card title="Delete account">
-      <p className="muted m0">Permanently erase your personal details and sign out. Anonymised attendance records are kept for your university.</p>
-      <div>
-        <Button variant="danger" onClick={() => setOpen(true)}>
-          Delete my account
-        </Button>
-      </div>
+      {pending ? (
+        <>
+          <Alert tone="warning">
+            You asked to delete your account on {niceDateTime(pending.requested_at)}. Your systems administrator has not decided yet.
+          </Alert>
+          <div>
+            <Button variant="secondary" onClick={withdraw}>
+              Withdraw the request
+            </Button>
+          </div>
+        </>
+      ) : (
+        <>
+          <p className="muted m0">
+            Ask for your account to be deleted. Your systems administrator approves the request; the account is then archived for {days} days (you cannot sign in, but it can still be
+            restored) and your personal details are erased after that.
+          </p>
+          {data?.request?.status === 'rejected' && <Alert tone="info">Your last request was not approved: {data.request.decision_note}</Alert>}
+          <div>
+            <Button variant="danger" onClick={() => setOpen(true)}>
+              Delete my account
+            </Button>
+          </div>
+        </>
+      )}
       <Modal
         open={open}
         onClose={() => setOpen(false)}
-        title="Delete your account?"
+        title="Ask to delete your account?"
         footer={
           <>
             <Button variant="secondary" onClick={() => setOpen(false)}>
               Cancel
             </Button>
             <Button variant="danger" loading={busy} disabled={!password} onClick={run}>
-              Delete account
+              Send request
             </Button>
           </>
         }
       >
-        <p>This cannot be undone. Your name, email, phone and other personal details are erased.</p>
+        <p>
+          Once your administrator approves, you can no longer sign in. After {days} days your name, email, phone numbers and other personal details are erased; anonymised attendance
+          records are kept for your university.
+        </p>
+        <Field label="Reason (optional)">
+          <Textarea value={reason} onChange={(e) => setReason(e.target.value)} />
+        </Field>
         <Field label="Confirm with your password">
           <Input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
         </Field>
@@ -122,10 +166,24 @@ export function ForcedPasswordChange() {
   );
 }
 
+const CONTACTS = [
+  ['phone', 'Phone', 'tel'],
+  ['alt_phone', 'Other phone', 'tel'],
+  ['contact_email', 'Contact email (other than your sign-in email)', 'email'],
+  ['office', 'Office / location', 'text'],
+  ['emergency_name', 'Emergency contact name', 'text'],
+  ['emergency_phone', 'Emergency contact phone', 'tel'],
+] as const;
+
+/** Who corrects a person's name and position. */
+const NAME_KEEPER: Record<string, string> = { hod: 'your Dean or the administrator', dean: 'the administrator', admin: 'another administrator', hr: 'the administrator' };
+
 function ProfileDetails() {
   const { user, refresh } = useAuth();
   const { toast, fail } = useFeedback();
-  const [form, setForm] = useState({ title: user?.title || '', name: user?.name || '', phone: user?.phone || '' });
+  const [form, setForm] = useState<Record<string, string>>(() =>
+    Object.fromEntries([...CONTACTS.map(([k]) => k), 'address'].map((k) => [k, ((user as any)?.[k] as string) || ''])),
+  );
   const [busy, setBusy] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   if (!user) return null;
@@ -136,7 +194,7 @@ function ProfileDetails() {
     try {
       await api('/api/auth/me', { method: 'PUT', body: form });
       await refresh();
-      toast('Profile updated');
+      toast('Contacts updated');
     } catch (err) {
       fail(err);
     } finally {
@@ -188,6 +246,7 @@ function ProfileDetails() {
             {user.title ? `${user.title} ` : ''}
             {user.name}
           </h3>
+          {user.designation && <div>{user.designation}</div>}
           <div className="muted">{user.email}</div>
           <div className="row gap-sm wrap" style={{ marginTop: 8 }}>
             <Button size="sm" variant="secondary" icon={<Camera size={14} />} loading={busy === 'photo'} onClick={() => fileRef.current?.click()}>
@@ -202,24 +261,33 @@ function ProfileDetails() {
         </div>
       </div>
       <form onSubmit={save} className="form-grid" style={{ marginTop: 14 }}>
-        {user.role !== 'student' && (
-          <Field label="Title">
-            <Input value={form.title} placeholder="Dr., Prof., Mr., Ms." onChange={(e) => setForm({ ...form, title: e.target.value })} />
+        <div className="span-2 field-label">Your contacts</div>
+        {CONTACTS.map(([k, label, type]) => (
+          <Field key={k} label={label}>
+            <Input type={type} value={form[k]} onChange={(e) => setForm({ ...form, [k]: e.target.value })} />
           </Field>
-        )}
-        <Field label="Full name" span={user.role === 'student' ? 2 : 1}>
-          <Input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-        </Field>
-        <Field label="Phone" span={2}>
-          <Input type="tel" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} />
+        ))}
+        <Field label="Address" span={2}>
+          <Textarea rows={2} value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} />
         </Field>
         <div className="span-2">
           <Button type="submit" loading={busy === 'save'}>
-            Save profile
+            Save contacts
           </Button>
         </div>
       </form>
       <dl className="details">
+        <dt>Name</dt>
+        <dd>
+          {user.title ? `${user.title} ` : ''}
+          {user.name}
+        </dd>
+        {user.role !== 'student' && (
+          <>
+            <dt>Position</dt>
+            <dd>{user.designation || '-'}</dd>
+          </>
+        )}
         <dt>Role</dt>
         <dd>
           {ROLE_LABELS[user.role]}
@@ -251,7 +319,9 @@ function ProfileDetails() {
           </>
         )}
       </dl>
-      <p className="muted small m0">Your email, role and unit are managed by your university administrator.</p>
+      <p className="muted small m0">
+        Your name, title, position and status are updated by {NAME_KEEPER[user.role] || 'your HoD or Dean'}; your email, role and unit by your university administrator.
+      </p>
     </Card>
   );
 }
@@ -261,7 +331,7 @@ export default function Profile() {
   if (!user) return null;
   return (
     <>
-      <PageHeader title="Profile" subtitle="Your details, profile picture and password." />
+      <PageHeader title="Profile" subtitle="Your profile picture, contacts and password." />
       <div className="grid-2 align-start">
         <ProfileDetails />
         <div className="stack">

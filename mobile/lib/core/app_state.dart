@@ -57,7 +57,8 @@ class AppState extends ChangeNotifier {
   bool get isClassRep => user?['is_class_rep'] == true;
   bool get isSuperAdmin => role == 'super_admin';
   bool get isHr => role == 'hr';
-  bool get isPartTimer => teaches && user?['employment_type'] == 'part_time';
+  bool get isPartTimer => teaches && (user?['employment_type'] == 'part_time' || user?['internal_part_time'] == true);
+  bool get isPartTimerByContract => teaches && user?['employment_type'] == 'part_time';
   /// HoDs, Deans, HR and admins take part in approving part-time pay claims.
   bool get approvesClaims => const ['admin', 'dean', 'hod', 'hr'].contains(role);
   /// Accounts created by an administrator must choose their own password first.

@@ -6,7 +6,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../core/app_state.dart';
 import '../widgets/common.dart';
 
-/// Research: projects (undergraduate), dissertations (Master's) and theses (PhD), concept to clearance.
+/// Research: Project (undergraduate), Dissertation (Master's) and Thesis (PhD), concept to clearance.
 class ResearchScreen extends StatefulWidget {
   const ResearchScreen({super.key});
 

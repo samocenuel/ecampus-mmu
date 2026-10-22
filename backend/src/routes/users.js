@@ -7,6 +7,7 @@ import { canManageDepartment, userScope } from '../scope.js';
 import { appointDean, appointHod, syncLeadership } from '../services/leadership.js';
 import { notify } from '../services/notify.js';
 import { badRequest, forbidden, notFound, pick, requireFields, toInt, truthy } from '../util.js';
+import { approveDeletion, CONTACT_FIELDS, cleanContacts, requestDeletion, restoreAccount } from '../services/people.js';
 import { isEmail, validatePassword } from './auth.js';
 
 const router = Router();
@@ -19,7 +20,10 @@ const MANAGEABLE = {
 };
 
 export const userSelect = `
-  SELECT u.id, u.university_id, u.name, u.email, u.role, u.employment_type, u.title, u.phone, u.identifier,
+  SELECT u.id, u.university_id, u.name, u.email, u.role, u.employment_type, u.title, u.designation, u.phone, u.identifier,
+         u.alt_phone, u.contact_email, u.office, u.address, u.emergency_name, u.emergency_phone, u.workload_min, u.workload_max,
+         (SELECT ad.purge_after FROM account_deletions ad WHERE ad.user_id = u.id AND ad.status = 'archived') AS archived_until,
+         (SELECT ad.id FROM account_deletions ad WHERE ad.user_id = u.id AND ad.status = 'pending') AS deletion_request_id,
          u.faculty_id, u.department_id, u.class_id, u.active, u.created_at,
          CASE WHEN u.photo_path IS NOT NULL THEN '/uploads/' || u.photo_path END AS photo_url,
          (SELECT 1 FROM student_devices sd WHERE sd.user_id = u.id) IS NOT NULL AS has_device,
@@ -64,6 +68,15 @@ function assertCanManage(actor, target) {
   if (!canManageDepartment(actor, target.department_id)) throw forbidden('That account is outside the unit you manage');
 }
 
+function managesTarget(actor, target) {
+  try {
+    assertCanManage(actor, target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** When a Dean/HoD is created for a unit with no leader yet, appoint them automatically. */
 /** A new Dean or HoD account takes over its unit (the previous leader goes back to lecturer). */
 function autoAppoint(userId, data) {
@@ -77,7 +90,7 @@ function autoAppoint(userId, data) {
   }
 }
 
-const EDITABLE = ['name', 'email', 'role', 'employment_type', 'title', 'phone', 'identifier', 'faculty_id', 'department_id', 'class_id'];
+const EDITABLE = ['name', 'email', 'role', 'employment_type', 'title', 'designation', 'identifier', 'faculty_id', 'department_id', 'class_id', 'workload_min', 'workload_max', ...CONTACT_FIELDS];
 
 function normalise(body) {
   const data = pick(body, EDITABLE);
@@ -87,6 +100,14 @@ function normalise(body) {
     if (!isEmail(data.email)) throw badRequest('Enter a valid email address');
   }
   if (data.name !== undefined) data.name = String(data.name).trim();
+  for (const k of ['title', 'designation']) if (data[k] !== undefined) data[k] = String(data[k] || '').trim().slice(0, 80) || null;
+  Object.assign(data, cleanContacts(pick(data, CONTACT_FIELDS)));
+  for (const k of ['workload_min', 'workload_max']) {
+    if (data[k] === undefined) continue;
+    data[k] = data[k] === '' || data[k] === null ? null : Number(data[k]);
+    if (data[k] !== null && !(data[k] >= 0 && data[k] <= 60)) throw badRequest('Workload limits are hours per week (0 to 60)');
+  }
+  if (data.workload_min != null && data.workload_max != null && data.workload_min > data.workload_max) throw badRequest('The minimum workload cannot be above the maximum');
   if (data.employment_type !== undefined && !['full_time', 'part_time'].includes(data.employment_type)) {
     throw badRequest('Employment type must be full_time or part_time');
   }
@@ -221,6 +242,73 @@ router.delete('/:id', requireRole('admin', 'dean', 'hod'), (req, res) => {
   q.run('UPDATE users SET active = 0 WHERE id = ?', existing.id);
   q.run('UPDATE classes SET class_rep_id = NULL WHERE class_rep_id = ?', existing.id);
   res.json({ ok: true });
+});
+
+// ------------------------------------------------------------------ Account deletion
+
+/** Deletion requests: the administrator sees all; HoDs and Deans the ones for people they manage. */
+router.get('/deletions/list', requireRole('admin', 'dean', 'hod'), (req, res) => {
+  const status = ['pending', 'archived', 'rejected', 'restored', 'purged', 'cancelled'].includes(req.query.status) ? req.query.status : null;
+  const rows = q.all(
+    `SELECT ad.*, u.name, u.email, u.role, u.identifier, u.department_id, u.faculty_id, u.class_id,
+            rb.name AS requested_by_name, db.name AS decided_by_name
+       FROM account_deletions ad JOIN users u ON u.id = ad.user_id
+       LEFT JOIN users rb ON rb.id = ad.requested_by LEFT JOIN users db ON db.id = ad.decided_by
+      WHERE ad.university_id = ? ${status ? 'AND ad.status = ?' : "AND ad.status IN ('pending','archived')"}
+      ORDER BY ad.status = 'pending' DESC, ad.id DESC`,
+    req.uid,
+    ...(status ? [status] : []),
+  );
+  const archiveDays = q.get('SELECT account_archive_days FROM universities WHERE id = ?', req.uid).account_archive_days;
+  res.json({ archive_days: archiveDays, items: rows.filter((r) => req.user.role === 'admin' || managesTarget(req.user, r)) });
+});
+
+/** A HoD or Dean asks the administrator to delete an account they manage. */
+router.post('/:id/request-deletion', requireRole('admin', 'dean', 'hod'), (req, res) => {
+  const existing = q.get('SELECT * FROM users WHERE id = ? AND university_id = ?', req.params.id, req.uid);
+  if (!existing) throw notFound('User');
+  if (existing.id === req.user.id) throw badRequest('Use Profile to delete your own account');
+  if (isProtectedDemoAccount(existing)) throw forbidden('This shared demo account cannot be deleted');
+  assertCanManage(req.user, existing);
+  const request = requestDeletion(existing, req.user, req.body?.reason);
+  // The administrator's own request is their approval.
+  res.status(201).json(req.user.role === 'admin' ? approveDeletion(request, req.user, req.body?.reason) : request);
+});
+
+const loadDeletion = (req) => {
+  const r = q.get('SELECT * FROM account_deletions WHERE id = ? AND university_id = ?', req.params.id, req.uid);
+  if (!r) throw notFound('Deletion request');
+  return r;
+};
+
+router.post('/deletions/:id/approve', requireRole('admin'), (req, res) => {
+  const r = loadDeletion(req);
+  if (r.status !== 'pending') throw badRequest('Only pending requests can be approved');
+  if (r.user_id === req.user.id) throw badRequest('Another administrator must approve your own deletion');
+  const target = q.get('SELECT * FROM users WHERE id = ?', r.user_id);
+  if (target.role === 'admin') {
+    const others = q.get("SELECT COUNT(*) AS n FROM users WHERE university_id = ? AND role = 'admin' AND active = 1 AND id != ?", req.uid, target.id).n;
+    if (!others) throw badRequest('This is the only administrator. Appoint another administrator first.');
+  }
+  const done = approveDeletion(r, req.user, String(req.body?.note || '').trim() || null);
+  res.json(done);
+});
+
+router.post('/deletions/:id/reject', requireRole('admin'), (req, res) => {
+  const r = loadDeletion(req);
+  if (r.status !== 'pending') throw badRequest('Only pending requests can be rejected');
+  const note = String(req.body?.note || '').trim();
+  if (!note) throw badRequest('Say why the account is kept');
+  q.run("UPDATE account_deletions SET status = 'rejected', decided_by = ?, decided_at = datetime('now'), decision_note = ? WHERE id = ?", req.user.id, note, r.id);
+  notify([r.user_id, r.requested_by].filter((x, i, a) => x && a.indexOf(x) === i), { title: 'Account deletion not approved', body: note, type: 'account', link: '/profile' });
+  res.json(q.get('SELECT * FROM account_deletions WHERE id = ?', r.id));
+});
+
+router.post('/deletions/:id/restore', requireRole('admin'), (req, res) => {
+  const r = loadDeletion(req);
+  if (r.status !== 'archived') throw badRequest('Only archived accounts can be restored');
+  restoreAccount(r, req.user, String(req.body?.note || '').trim() || null);
+  res.json(q.get('SELECT * FROM account_deletions WHERE id = ?', r.id));
 });
 
 /**

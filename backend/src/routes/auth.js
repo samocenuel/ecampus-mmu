@@ -8,6 +8,7 @@ import { authenticate, hashPassword, loadUser, signToken, verifyPassword } from 
 import { DEMO_ROLES, demoUniversity, isProtectedDemoAccount } from '../demo.js';
 import { insert, q, tx } from '../db.js';
 import { badRequest, forbidden, HttpError, notFound, pick, requireFields, slugify } from '../util.js';
+import { CONTACT_FIELDS, cleanContacts, requestDeletion } from '../services/people.js';
 import { universityPayload, validateUniversityFields } from './university.js';
 
 const router = Router();
@@ -58,7 +59,15 @@ router.post('/login', (req, res) => {
   if (!email || !password) throw badRequest('Email and password are required');
   const row = q.get('SELECT id, password_hash, active FROM users WHERE email = ?', String(email).trim());
   if (!row || !verifyPassword(String(password), row.password_hash)) throw new HttpError(401, 'Incorrect email or password');
-  if (!row.active) throw new HttpError(403, 'This account has been disabled. Contact your administrator.');
+  if (!row.active) {
+    const archived = q.get("SELECT purge_after FROM account_deletions WHERE user_id = ? AND status = 'archived'", row.id);
+    throw new HttpError(
+      403,
+      archived
+        ? `This account is archived for deletion on ${archived.purge_after}. Ask your administrator if it should be restored.`
+        : 'This account has been disabled. Contact your administrator.',
+    );
+  }
   const user = loadUser(row.id);
   if (user.university_id) {
     const uni = q.get('SELECT active FROM universities WHERE id = ?', user.university_id);
@@ -102,15 +111,18 @@ router.post('/change-password', authenticate, (req, res) => {
   res.json({ ok: true, user: loadUser(req.user.id) });
 });
 
-/** People update their own name, title and phone (email and role are managed by administrators). */
+/**
+ * People keep their own contacts up to date (photo via /me/photo). Name, title and position are
+ * official records: the HoD, Dean or administrator changes them in Users.
+ */
 router.put('/me', authenticate, (req, res) => {
-  const data = pick(req.body || {}, ['name', 'title', 'phone']);
-  if (data.name !== undefined) {
-    data.name = String(data.name).trim();
-    if (data.name.length < 2) throw badRequest('Enter your full name');
-    if (isProtectedDemoAccount(req.user)) throw forbidden('The shared demo accounts keep their names');
+  const body = req.body || {};
+  for (const k of ['name', 'title', 'designation']) {
+    if (body[k] === undefined) continue;
+    const now = String(req.user[k] || '').trim();
+    if (String(body[k] || '').trim() !== now) throw forbidden('Your name, title and position are updated by your HoD, Dean or administrator');
   }
-  for (const k of ['title', 'phone']) if (data[k] !== undefined) data[k] = String(data[k] || '').trim() || null;
+  const data = cleanContacts(pick(body, CONTACT_FIELDS));
   const keys = Object.keys(data);
   if (keys.length) q.run(`UPDATE users SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`, ...keys.map((k) => data[k]), req.user.id);
   res.json({ user: loadUser(req.user.id) });
@@ -147,9 +159,16 @@ router.delete('/me/photo', authenticate, (req, res) => {
   res.json({ user: loadUser(req.user.id) });
 });
 
+/** The person's latest account deletion request, if any. */
+router.get('/delete-account', authenticate, (req, res) => {
+  const r = q.get("SELECT id, status, reason, requested_at, decided_at, decision_note, purge_after FROM account_deletions WHERE user_id = ? ORDER BY id DESC LIMIT 1", req.user.id);
+  const days = q.get('SELECT account_archive_days FROM universities WHERE id = ?', req.uid)?.account_archive_days ?? 30;
+  res.json({ request: r || null, archive_days: days });
+});
+
 /**
- * Self-service account deletion (required by app stores). Personal data is erased and the
- * account disabled; anonymised teaching/attendance records are kept for the university's statistics.
+ * Self-service account deletion (required by app stores): a request the university's administrator
+ * approves. The account is then archived (disabled, restorable) for the archive period and erased after.
  */
 router.post('/delete-account', authenticate, (req, res) => {
   if (isProtectedDemoAccount(req.user)) throw forbidden('The demo accounts are shared, so they cannot be deleted');
@@ -164,23 +183,14 @@ router.post('/delete-account', authenticate, (req, res) => {
     ).n;
     if (!others) throw badRequest('You are the only administrator. Appoint another administrator before deleting your account.');
   }
-  tx(() => {
-    const id = req.user.id;
-    q.run(
-      `UPDATE users SET name = 'Deleted user', email = ?, password_hash = ?, phone = NULL, identifier = NULL,
-              title = NULL, photo_path = NULL, calendar_token = NULL, active = 0 WHERE id = ?`,
-      `deleted-${id}@deleted.invalid`,
-      hashPassword(crypto.randomBytes(24).toString('hex')),
-      id,
-    );
-    q.run('UPDATE classes SET class_rep_id = NULL WHERE class_rep_id = ?', id);
-    q.run('UPDATE faculties SET dean_id = NULL WHERE dean_id = ?', id);
-    q.run('UPDATE departments SET hod_id = NULL WHERE hod_id = ?', id);
-    q.run('DELETE FROM notifications WHERE user_id = ?', id);
-    q.run('DELETE FROM notification_prefs WHERE user_id = ?', id);
-    q.run('DELETE FROM student_devices WHERE user_id = ?', id);
-  });
-  removePhoto(req.user.photo_path);
+  const request = requestDeletion(req.user, req.user, req.body?.reason);
+  res.status(201).json({ ok: true, request });
+});
+
+/** Withdraws a request the administrator has not decided yet. */
+router.delete('/delete-account', authenticate, (req, res) => {
+  const changed = q.run("UPDATE account_deletions SET status = 'cancelled', decided_at = datetime('now') WHERE user_id = ? AND status = 'pending'", req.user.id).changes;
+  if (!changed) throw notFound('Pending deletion request');
   res.json({ ok: true });
 });
 

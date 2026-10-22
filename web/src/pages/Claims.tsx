@@ -472,7 +472,7 @@ export default function Claims() {
   const { user, university } = useAuth();
   const navigate = useNavigate();
   const { fail } = useFeedback();
-  const partTimer = user?.employment_type === 'part_time';
+  const partTimer = user?.employment_type === 'part_time' || Boolean(user?.internal_part_time);
   const approver = ['admin', 'dean', 'hod', 'hr'].includes(user?.role || '');
   const tabs: { value: View; label: string; count?: number }[] = [
     ...(partTimer ? [{ value: 'mine' as View, label: 'My claims' }] : []),

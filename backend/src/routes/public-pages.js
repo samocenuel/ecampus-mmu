@@ -5,7 +5,7 @@ import { Router } from 'express';
 const router = Router();
 const APP = process.env.APP_NAME || 'eCampus';
 const CONTACT = process.env.SUPPORT_EMAIL || '';
-const UPDATED = '12 October 2026';
+const UPDATED = '22 October 2026';
 
 const contactLine = CONTACT
   ? `<a href="mailto:${CONTACT}">${CONTACT}</a>`
@@ -34,7 +34,8 @@ export const privacyPage = ({ deletionHref = '/account-deletion' } = {}) =>
 <p>${APP} ("the app") helps universities manage teaching and learning: timetables, lecture allocation, attendance and lecture reminders. Each university that uses the app controls its own data. This policy explains what the app collects and why.</p>
 <h2>Information we collect</h2>
 <ul>
-  <li><strong>Account details</strong> your university provides or you enter: name, email address, phone number, title, staff or registration number, role, faculty, department and class.</li>
+  <li><strong>Account details</strong> your university provides: name, title, position, email address, staff or registration number, role, faculty, department and class.</li>
+  <li><strong>Contact details</strong> you choose to add in your profile: phone numbers, a contact email, office, address and an emergency contact, and an optional profile photo.</li>
   <li><strong>Academic records</strong> created while using the app: timetables, teaching allocations, attendance registers (who was present at which lecture) and their approval status.</li>
   <li><strong>Preferences</strong>: lecture reminder settings and in-app notifications.</li>
   <li><strong>University details</strong> entered by administrators, including an uploaded university logo image.</li>
@@ -49,7 +50,7 @@ export const privacyPage = ({ deletionHref = '/account-deletion' } = {}) =>
 <h2>Notifications</h2>
 <p>If you allow notifications, the app schedules lecture reminders on your device. You can turn reminders off at any time under Alerts.</p>
 <h2>Deleting your account</h2>
-<p>You can delete your account in the app (More &rarr; Profile &amp; password &rarr; Delete my account) or on the web. See <a href="${deletionHref}">how to delete your account</a>. Your personal details are erased; anonymised attendance statistics may be kept by your university.</p>
+<p>You can ask to delete your account in the app (More &rarr; Profile &amp; password &rarr; Delete my account) or on the web. Your university's systems administrator approves the request; the account is then archived (you can no longer sign in) for the period your university sets, normally 30 days, and your personal details are erased after that. See <a href="${deletionHref}">how to delete your account</a>. Anonymised attendance statistics may be kept by your university.</p>
 <h2>Children</h2>
 <p>The app is intended for university staff and students and is not directed at children under 13.</p>
 <h2>Contact</h2>
@@ -60,13 +61,15 @@ export const privacyPage = ({ deletionHref = '/account-deletion' } = {}) =>
 export const deletionPage = ({ webHref = '/' } = {}) =>
   page(
     'Delete your account',
-    `<p>You can delete your ${APP} account and personal data at any time.</p>
+    `<p>You can ask for your ${APP} account and personal data to be deleted at any time.</p>
 <h2>In the mobile app</h2>
-<ol><li>Sign in and open <strong>More</strong>.</li><li>Tap <strong>Profile &amp; password</strong>.</li><li>Tap <strong>Delete my account</strong> and confirm with your password.</li></ol>
+<ol><li>Sign in and open <strong>More</strong>.</li><li>Tap <strong>Profile &amp; password</strong>.</li><li>Tap <strong>Delete my account</strong>, give a reason if you like, and confirm with your password.</li></ol>
 <h2>On the web</h2>
 <ol><li>Sign in at <a href="${webHref}">${APP} on the web</a>.</li><li>Open your name (top right) &rarr; <strong>Profile &amp; password</strong>.</li><li>Choose <strong>Delete my account</strong> and confirm with your password.</li></ol>
+<h2>What happens next</h2>
+<ol><li>Your university's systems administrator reviews the request. You can withdraw it until then.</li><li>Once approved, the account is <strong>archived</strong>: you can no longer sign in. During the archive period (set by your university, normally 30 days) the administrator can still restore it if it was a mistake.</li><li>When the archive period ends, your personal data is erased permanently.</li></ol>
 <h2>What is deleted</h2>
-<p>Your name, email address, phone number, staff/registration number, notifications and reminder settings are erased immediately and you can no longer sign in. Attendance and teaching records are kept only in anonymised form ("Deleted user") so your university's statistics stay correct.</p>
+<p>Your name, email address, phone numbers and other contact details, profile photo, staff/registration number, notifications and reminder settings are erased at the end of the archive period. Attendance and teaching records are kept only in anonymised form ("Deleted user") so your university's statistics stay correct.</p>
 <p>If you cannot sign in, ask ${contactLine} to delete your account for you.</p>`,
   );
 

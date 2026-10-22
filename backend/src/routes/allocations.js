@@ -7,6 +7,7 @@ import { canManageDepartment, managedDepartmentIds, placeholders, resolveTerm, v
 import { allocationRequirements, crossCuttingUnitCount, pendingCrossCutting } from '../services/allocation-rules.js';
 import { notify } from '../services/notify.js';
 import { allocationContext, checkSession } from '../services/timetable.js';
+import { workloadCheck, workloads } from '../services/workload.js';
 import { badRequest, forbidden, HttpError, needsConfirmation, notFound, requireFields, toInt, truthy } from '../util.js';
 
 const router = Router();
@@ -85,7 +86,8 @@ function validateAllocation(req, { courseUnitId, lecturerId, classIds, termId, e
   const cu = q.get('SELECT * FROM course_units WHERE id = ? AND university_id = ?', courseUnitId, req.uid);
   if (!cu) throw badRequest('Unknown course unit');
   const lecturer = q.get(
-    `SELECT id, name, role FROM users WHERE id = ? AND university_id = ? AND active = 1 AND role IN (${placeholders(TEACHING_ROLES)})`,
+    `SELECT id, name, title, role, employment_type, workload_min, workload_max, university_id FROM users
+      WHERE id = ? AND university_id = ? AND active = 1 AND role IN (${placeholders(TEACHING_ROLES)})`,
     lecturerId,
     req.uid,
     ...TEACHING_ROLES,
@@ -122,6 +124,23 @@ function validateAllocation(req, { courseUnitId, lecturerId, classIds, termId, e
   return { cu, lecturer, classes };
 }
 
+/**
+ * Above the lecturer's maximum load the HoD must override: the extra hours become internal
+ * part-time load (paid through pay claims), or the unit can be offered as an internal part-time call.
+ */
+function checkWorkload(req, lecturer, termId, hours, excludeId = null) {
+  const load = workloadCheck(lecturer, termId, hours, excludeId);
+  if (load.over_max && !truthy(req.body.override_workload)) {
+    const name = [lecturer.title, lecturer.name].filter(Boolean).join(' ');
+    throw new HttpError(
+      409,
+      `${name} would teach ${load.after} h a week, above their ${load.max} h maximum. Override to give the extra ${load.excess} h as ${load.part_time ? 'extra part-time hours' : 'internal part-time load'}, choose someone else, or call for internal part-timers.`,
+      { code: 'WORKLOAD_OVER_MAX', workload: load },
+    );
+  }
+  return { load, partTimeHours: load.over_max && !load.part_time ? load.excess : 0 };
+}
+
 router.post('/', requireRole(...MANAGER_ROLES), (req, res) => {
   requireFields(req.body, ['course_unit_id', 'lecturer_id', 'class_ids']);
   const term = resolveTerm(req.uid, toInt(req.body.term_id));
@@ -153,6 +172,7 @@ router.post('/', requireRole(...MANAGER_ROLES), (req, res) => {
   }
 
   const hours = toInt(req.body.hours_per_week) || cu.hours_per_week;
+  const { partTimeHours } = checkWorkload(req, lecturer, term.id, hours);
   const id = tx(() => {
     const aid = insert('allocations', {
       university_id: req.uid,
@@ -160,6 +180,7 @@ router.post('/', requireRole(...MANAGER_ROLES), (req, res) => {
       course_unit_id: cu.id,
       lecturer_id: lecturer.id,
       hours_per_week: hours,
+      part_time_hours: partTimeHours,
       notes: req.body.notes || null,
       created_by: req.user.id,
     });
@@ -168,7 +189,7 @@ router.post('/', requireRole(...MANAGER_ROLES), (req, res) => {
   });
   notify(lecturer.id, {
     title: `New teaching allocation: ${cu.code}`,
-    body: `${cu.name} for ${classes.map((c) => c.name).join(', ')} (${hours} hrs/week, ${term.name})`,
+    body: `${cu.name} for ${classes.map((c) => c.name).join(', ')} (${hours} hrs/week, ${term.name})${partTimeHours ? `. ${partTimeHours} h a week of it is internal part-time load you can claim.` : ''}`,
     type: 'allocation',
     link: '/my-timetable',
   });
@@ -182,7 +203,13 @@ router.put('/:id', requireRole(...MANAGER_ROLES), (req, res) => {
   const classIds = req.body.class_ids
     ? [...new Set([].concat(req.body.class_ids).map(Number).filter(Boolean))]
     : existing.class_ids;
-  validateAllocation(req, { courseUnitId: existing.course_unit_id, lecturerId, classIds, termId: existing.term_id, excludeAllocationId: existing.id });
+  const { lecturer } = validateAllocation(req, { courseUnitId: existing.course_unit_id, lecturerId, classIds, termId: existing.term_id, excludeAllocationId: existing.id });
+  const hours = toInt(req.body.hours_per_week) || existing.hours_per_week;
+  // Re-check the load only when the lecturer or the hours change.
+  const partTimeHours =
+    lecturerId !== existing.lecturer_id || hours !== existing.hours_per_week
+      ? checkWorkload(req, lecturer, existing.term_id, hours, existing.id).partTimeHours
+      : existing.part_time_hours || 0;
 
   // Re-check every scheduled session against the new lecturer / classes.
   const sessions = q.all('SELECT * FROM timetable_sessions WHERE allocation_id = ?', existing.id);
@@ -209,7 +236,8 @@ router.put('/:id', requireRole(...MANAGER_ROLES), (req, res) => {
     update('allocations', existing.id, {
       status: 'confirmed',
       lecturer_id: lecturerId,
-      hours_per_week: toInt(req.body.hours_per_week) || existing.hours_per_week,
+      hours_per_week: hours,
+      part_time_hours: partTimeHours,
       notes: req.body.notes !== undefined ? req.body.notes : existing.notes,
     });
     if (req.body.class_ids) {
@@ -265,6 +293,177 @@ router.post('/confirm-drafts', requireRole(...MANAGER_ROLES), (req, res) => {
     }
   });
   res.json({ ok: true, confirmed });
+});
+
+/** Teaching staff load against their minimum and maximum this term. */
+router.get('/workloads', requireRole(...MANAGER_ROLES), (req, res) => {
+  const term = resolveTerm(req.uid, toInt(req.query.term_id));
+  const uni = q.get('SELECT workload_min_hours, workload_max_hours FROM universities WHERE id = ?', req.uid);
+  res.json({ term, default_min: uni.workload_min_hours, default_max: uni.workload_max_hours, items: term ? workloads(req.uid, term.id) : [] });
+});
+
+// ------------------------------------------------------------------ Internal part-time calls
+
+const callSelect = `
+  SELECT pc.*, cu.code, cu.name AS course_name, cu.department_id AS unit_department_id, t.name AS term_name,
+         u.name AS created_by_name, f.name AS filled_by_name
+    FROM part_time_calls pc JOIN course_units cu ON cu.id = pc.course_unit_id JOIN academic_terms t ON t.id = pc.term_id
+    LEFT JOIN users u ON u.id = pc.created_by LEFT JOIN users f ON f.id = pc.filled_by`;
+
+function callView(user, c) {
+  const classIds = JSON.parse(c.class_ids);
+  const classes = classIds.length ? q.all(`SELECT id, name FROM classes WHERE id IN (${placeholders(classIds)})`, ...classIds) : [];
+  const responses = q.all(
+    `SELECT r.user_id, r.note, r.created_at, u.name, u.title, d.name AS department_name FROM part_time_call_responses r
+       JOIN users u ON u.id = r.user_id LEFT JOIN departments d ON d.id = u.department_id WHERE r.call_id = ? ORDER BY r.id`,
+    c.id,
+  );
+  const manager = MANAGER_ROLES.includes(user.role) && (!c.department_id || canManageDepartment(user, c.department_id));
+  const load = manager ? new Map(workloads(user.university_id, c.term_id, responses.map((r) => r.user_id)).map((w) => [w.id, w])) : new Map();
+  return {
+    ...c,
+    classes,
+    responded: responses.some((r) => r.user_id === user.id),
+    response_count: responses.length,
+    responses: manager ? responses.map((r) => ({ ...r, workload: load.get(r.user_id) || null })) : [],
+    can_manage: manager,
+  };
+}
+
+/** Teaching staff who can be offered a call: full-time, in the unit's department (or the classes' departments). */
+function callAudience(c, departmentIds) {
+  if (!departmentIds.length) return [];
+  return q
+    .all(
+      `SELECT id FROM users WHERE university_id = ? AND active = 1 AND employment_type = 'full_time' AND role IN ('lecturer','hod','dean')
+        AND department_id IN (${placeholders(departmentIds)})`,
+      c.university_id,
+      ...departmentIds,
+    )
+    .map((r) => r.id);
+}
+
+router.get('/part-time-calls', (req, res) => {
+  if (!['admin', 'dean', 'hod', 'lecturer'].includes(req.user.role)) throw forbidden();
+  const term = resolveTerm(req.uid, toInt(req.query.term_id));
+  const rows = q.all(`${callSelect} WHERE pc.university_id = ? ${term ? 'AND pc.term_id = ?' : ''} ORDER BY pc.status = 'open' DESC, pc.id DESC`, req.uid, ...(term ? [term.id] : []));
+  const depts = visibleDepartmentIds(req.user);
+  const visible = rows.filter((c) =>
+    MANAGER_ROLES.includes(req.user.role)
+      ? depts === null || !c.department_id || depts.includes(c.department_id)
+      : c.status === 'open' ? !c.department_id || c.department_id === req.user.department_id : c.filled_by === req.user.id,
+  );
+  res.json(visible.map((c) => callView(req.user, c)));
+});
+
+/** The HoD offers a unit to full-time staff as internal part-time load. */
+router.post('/part-time-calls', requireRole(...MANAGER_ROLES), (req, res) => {
+  requireFields(req.body, ['course_unit_id', 'class_ids']);
+  const term = resolveTerm(req.uid, toInt(req.body.term_id));
+  if (!term) throw badRequest('Create an academic term first');
+  const classIds = [...new Set([].concat(req.body.class_ids).map(Number).filter(Boolean))];
+  const cu = q.get('SELECT * FROM course_units WHERE id = ? AND university_id = ?', toInt(req.body.course_unit_id), req.uid);
+  if (!cu) throw badRequest('Unknown course unit');
+  if (!classIds.length) throw badRequest('Select at least one class');
+  const classes = q.all(
+    `SELECT c.id, c.name, p.department_id FROM classes c JOIN programs p ON p.id = c.program_id WHERE c.university_id = ? AND c.id IN (${placeholders(classIds)})`,
+    req.uid,
+    ...classIds,
+  );
+  if (classes.length !== classIds.length) throw badRequest('One or more classes were not found');
+  const ok = cu.department_id ? canManageDepartment(req.user, cu.department_id) || classes.every((c) => canManageDepartment(req.user, c.department_id)) : req.user.role === 'admin' || classes.every((c) => canManageDepartment(req.user, c.department_id));
+  if (!ok) throw forbidden('That course unit and classes are outside the unit you manage');
+  if (q.get("SELECT 1 FROM part_time_calls WHERE term_id = ? AND course_unit_id = ? AND status = 'open'", term.id, cu.id)) throw badRequest(`There is already an open call for ${cu.code}`);
+  const hours = Number(req.body.hours_per_week) || cu.hours_per_week;
+  const departmentId = cu.department_id || classes[0].department_id;
+  const id = insert('part_time_calls', {
+    university_id: req.uid,
+    term_id: term.id,
+    course_unit_id: cu.id,
+    class_ids: JSON.stringify(classIds),
+    hours_per_week: hours,
+    department_id: departmentId,
+    note: String(req.body.note || '').trim().slice(0, 1000) || null,
+    created_by: req.user.id,
+  });
+  const c = q.get(`${callSelect} WHERE pc.id = ?`, id);
+  const audience = callAudience(c, [...new Set([departmentId, ...classes.map((x) => x.department_id)].filter(Boolean))]).filter((u) => u !== req.user.id);
+  notify(audience, {
+    title: `Internal part-time teaching: ${cu.code}`,
+    body: `${cu.name} for ${classes.map((x) => x.name).join(', ')}, ${hours} h a week this term, paid as part-time load. Respond in Load allocation if you can take it.`,
+    type: 'allocation',
+    link: '/part-time-calls',
+  });
+  res.status(201).json({ ...callView(req.user, c), notified: audience.length });
+});
+
+const loadCall = (req) => {
+  const c = q.get(`${callSelect} WHERE pc.id = ? AND pc.university_id = ?`, toInt(req.params.id), req.uid);
+  if (!c) throw notFound('Part-time call');
+  return c;
+};
+
+/** A full-time lecturer offers to take the unit. */
+router.post('/part-time-calls/:id/respond', requireRole(...TEACHING_ROLES), (req, res) => {
+  const c = loadCall(req);
+  if (c.status !== 'open') throw badRequest('This call is closed');
+  if (req.user.employment_type !== 'full_time') throw badRequest('Internal part-time calls are for full-time staff');
+  q.run(
+    'INSERT INTO part_time_call_responses (call_id, user_id, note) VALUES (?, ?, ?) ON CONFLICT (call_id, user_id) DO UPDATE SET note = excluded.note',
+    c.id,
+    req.user.id,
+    String(req.body?.note || '').trim().slice(0, 500) || null,
+  );
+  notify(c.created_by, { title: `${req.user.name} can take ${c.code}`, body: 'Internal part-time call: assign the unit in Load allocation.', type: 'allocation', link: '/part-time-calls' });
+  res.json(callView(req.user, loadCall(req)));
+});
+
+router.delete('/part-time-calls/:id/respond', requireRole(...TEACHING_ROLES), (req, res) => {
+  const c = loadCall(req);
+  q.run('DELETE FROM part_time_call_responses WHERE call_id = ? AND user_id = ?', c.id, req.user.id);
+  res.json(callView(req.user, loadCall(req)));
+});
+
+/** The HoD gives the unit to one respondent: an allocation that is all internal part-time load. */
+router.post('/part-time-calls/:id/assign', requireRole(...MANAGER_ROLES), (req, res) => {
+  const c = loadCall(req);
+  if (!callView(req.user, c).can_manage) throw forbidden();
+  if (c.status !== 'open') throw badRequest('This call is already closed');
+  const userId = toInt(req.body?.user_id);
+  if (!q.get('SELECT 1 FROM part_time_call_responses WHERE call_id = ? AND user_id = ?', c.id, userId)) throw badRequest('Choose one of the lecturers who responded');
+  const classIds = JSON.parse(c.class_ids);
+  const { lecturer } = validateAllocation(req, { courseUnitId: c.course_unit_id, lecturerId: userId, classIds, termId: c.term_id });
+  const aid = tx(() => {
+    const id = insert('allocations', {
+      university_id: req.uid,
+      term_id: c.term_id,
+      course_unit_id: c.course_unit_id,
+      lecturer_id: lecturer.id,
+      hours_per_week: c.hours_per_week,
+      part_time_hours: c.hours_per_week,
+      notes: 'Internal part-time load (call #' + c.id + ')',
+      created_by: req.user.id,
+    });
+    for (const cl of classIds) q.run('INSERT INTO allocation_classes (allocation_id, class_id) VALUES (?, ?)', id, cl);
+    q.run("UPDATE part_time_calls SET status = 'filled', allocation_id = ?, filled_by = ?, closed_at = datetime('now') WHERE id = ?", id, lecturer.id, c.id);
+    return id;
+  });
+  notify(lecturer.id, {
+    title: `Internal part-time teaching: ${c.code} is yours`,
+    body: `${c.course_name}, ${c.hours_per_week} h a week this term. Claim the lectures in Pay claims once attendance is approved.`,
+    type: 'allocation',
+    link: '/my-timetable',
+  });
+  const others = q.all('SELECT user_id FROM part_time_call_responses WHERE call_id = ? AND user_id != ?', c.id, lecturer.id).map((r) => r.user_id);
+  notify(others, { title: `${c.code} has been assigned`, body: 'Thank you for responding to the internal part-time call.', type: 'allocation', link: '/part-time-calls' });
+  res.json({ call: callView(req.user, loadCall(req)), allocation: listAllocations(req.uid, ['a.id = ?'], [aid])[0] });
+});
+
+router.post('/part-time-calls/:id/close', requireRole(...MANAGER_ROLES), (req, res) => {
+  const c = loadCall(req);
+  if (!callView(req.user, c).can_manage) throw forbidden();
+  q.run("UPDATE part_time_calls SET status = 'closed', closed_at = datetime('now') WHERE id = ? AND status = 'open'", c.id);
+  res.json(callView(req.user, loadCall(req)));
 });
 
 router.delete('/:id', requireRole(...MANAGER_ROLES), (req, res) => {
