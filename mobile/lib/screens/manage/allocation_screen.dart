@@ -173,8 +173,8 @@ class _AllocationScreenState extends State<AllocationScreen> {
             for (final c in classes)
               Chip(
                 visualDensity: VisualDensity.compact,
-                backgroundColor: c['allocation_id'] != null ? Colors.green.shade50 : Colors.orange.shade50,
-                label: Text('${c['class_name']}${c['lecturer_name'] != null ? ' · ${c['lecturer_name']}' : ''}', style: const TextStyle(fontSize: 12)),
+                backgroundColor: c['draft'] == true ? Colors.blue.shade50 : c['allocation_id'] != null ? Colors.green.shade50 : Colors.orange.shade50,
+                label: Text('${c['class_name']}${c['lecturer_name'] != null ? ' · ${c['lecturer_name']}' : ''}${c['draft'] == true ? ' (draft)' : ''}', style: const TextStyle(fontSize: 12)),
               ),
           ]),
         ]),

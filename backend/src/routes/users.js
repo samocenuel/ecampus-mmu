@@ -4,6 +4,7 @@ import { hashPassword, requireRole, STAFF_ROLES } from '../auth.js';
 import { insert, q, tx, update } from '../db.js';
 import { isProtectedDemoAccount } from '../demo.js';
 import { canManageDepartment, userScope } from '../scope.js';
+import { appointDean, appointHod, syncLeadership } from '../services/leadership.js';
 import { notify } from '../services/notify.js';
 import { badRequest, forbidden, notFound, pick, requireFields, toInt, truthy } from '../util.js';
 import { isEmail, validatePassword } from './auth.js';
@@ -64,12 +65,15 @@ function assertCanManage(actor, target) {
 }
 
 /** When a Dean/HoD is created for a unit with no leader yet, appoint them automatically. */
+/** A new Dean or HoD account takes over its unit (the previous leader goes back to lecturer). */
 function autoAppoint(userId, data) {
   if (data.role === 'dean' && data.faculty_id) {
-    q.run('UPDATE faculties SET dean_id = ? WHERE id = ? AND dean_id IS NULL', userId, data.faculty_id);
+    const faculty = q.get('SELECT * FROM faculties WHERE id = ?', data.faculty_id);
+    if (faculty) appointDean(faculty, userId);
   }
   if (data.role === 'hod' && data.department_id) {
-    q.run('UPDATE departments SET hod_id = ? WHERE id = ? AND hod_id IS NULL', userId, data.department_id);
+    const dept = q.get('SELECT * FROM departments WHERE id = ?', data.department_id);
+    if (dept) appointHod(dept, userId);
   }
 }
 
@@ -202,7 +206,7 @@ router.put('/:id', requireRole('admin', 'dean', 'hod'), (req, res) => {
       q.run('UPDATE classes SET class_rep_id = NULL WHERE class_rep_id = ?', existing.id);
     }
     update('users', existing.id, data);
-    autoAppoint(existing.id, { ...existing, ...data });
+    syncLeadership(existing, { ...existing, ...data });
   });
   res.json(q.get(`${userSelect} WHERE u.id = ?`, existing.id));
 });

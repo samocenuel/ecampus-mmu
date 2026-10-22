@@ -20,6 +20,7 @@ export function allocationRequirements(universityId, term, departmentIds = null)
        FROM program_course_units pcu
        JOIN course_units cu ON cu.id = pcu.course_unit_id
        JOIN classes c ON c.program_id = pcu.program_id AND c.year_of_study = pcu.year_of_study
+                     AND c.curriculum_version_id = pcu.version_id AND c.status = 'active'
        JOIN programs p ON p.id = c.program_id
       WHERE cu.university_id = ? AND pcu.semester = ?
       ORDER BY cu.is_cross_cutting DESC, cu.code, c.name`,
@@ -30,7 +31,7 @@ export function allocationRequirements(universityId, term, departmentIds = null)
     ? allNeeds
     : allNeeds.filter((n) => departmentIds.includes(n.department_id) || departmentIds.includes(n.program_department_id));
   const allocated = q.all(
-    `SELECT a.id AS allocation_id, a.course_unit_id, ac.class_id, u.name AS lecturer_name
+    `SELECT a.id AS allocation_id, a.course_unit_id, ac.class_id, u.name AS lecturer_name, a.status AS allocation_status
        FROM allocations a
        JOIN allocation_classes ac ON ac.allocation_id = a.id
        JOIN users u ON u.id = a.lecturer_id
@@ -66,6 +67,7 @@ export function allocationRequirements(universityId, term, departmentIds = null)
       program_department_id: n.program_department_id,
       allocation_id: a?.allocation_id ?? null,
       lecturer_name: a?.lecturer_name ?? null,
+      draft: a?.allocation_status === 'draft',
     });
     unit.total++;
     if (a) unit.allocated_count++;

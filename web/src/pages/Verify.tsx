@@ -66,7 +66,7 @@ export default function Verify() {
             <div className={`verify-result ${r.cleared ? 'good' : 'pending'}`}>
               {r.cleared ? <BadgeCheck size={28} /> : <Clock size={28} />}
               <div>
-                <strong>{r.cleared ? 'Genuine requisition, cleared for payment' : 'Genuine requisition, not yet cleared'}</strong>
+                <strong>{r.cleared ? 'Genuine requisition, approved for payment' : 'Genuine requisition, not yet approved for payment'}</strong>
                 <p className="m0">Code {data.code} · requisition #{r.id}</p>
               </div>
             </div>
@@ -76,7 +76,13 @@ export default function Verify() {
               <dt>Amount claimed</dt>
               <dd><strong>{money(r.amount, r.currency)}</strong></dd>
               <dt>Approval status</dt>
-              <dd><Badge tone={r.status === 'paid' || r.cleared ? 'success' : r.status === 'rejected' ? 'danger' : 'warning'}>{r.status_label}</Badge>{r.paid_at ? ` · paid ${niceDateTime(r.paid_at)}` : ''}</dd>
+              <dd><Badge tone={r.cleared ? 'success' : r.status === 'rejected' ? 'danger' : 'warning'}>{r.status_label}</Badge></dd>
+              {r.paid && (
+                <>
+                  <dt>Payment</dt>
+                  <dd>Recorded by HR{r.paid_at ? ` on ${niceDateTime(r.paid_at)}` : ''}</dd>
+                </>
+              )}
               <dt>Department</dt>
               <dd>{[r.department, r.faculty].filter(Boolean).join(', ')}</dd>
               <dt>Period</dt>

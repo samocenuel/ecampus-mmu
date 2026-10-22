@@ -465,7 +465,7 @@ router.get('/:id/requisition', async (req, res) => {
   const signers = signOffs(claim);
   const code = formatCode(ensureVerifyCode(claim.id));
   const url = `${publicBase(req)}/verify/${code}`;
-  const statusLabel = STATUS_LABELS[claim.status];
+  const statusLabel = ['hr_verified', 'paid'].includes(claim.status) ? 'Approved for payment' : STATUS_LABELS[claim.status];
   const vote = claim.vote_id ? q.get('SELECT * FROM pay_votes WHERE id = ?', claim.vote_id) : null;
   const lecturer = q.get('SELECT name, title, phone, role, employment_type FROM users WHERE id = ?', claim.lecturer_id);
   const university = q.get('SELECT * FROM universities WHERE id = ?', req.uid);
@@ -595,8 +595,8 @@ router.post('/:id/approve', (req, res) => {
   if (stage.next === 'paid') {
     notify(claim.lecturer_id, { title: 'Claim paid', body: `${claim.title}: ${claim.currency} ${claim.total.toLocaleString('en')} (ref. ${reference})`, type: 'claim', link: `/claims/${claim.id}` });
   } else {
-    notify(nextActors(fresh, stage.next), { title: stage.next === 'hr_verified' ? 'Cleared claim to pay' : 'Part-time claim to approve', body: `${claim.lecturer_name}: ${claim.title}`, type: 'claim', link: `/claims/${claim.id}` });
-    notify(claim.lecturer_id, { title: `Claim ${stage.next === 'hr_verified' ? 'given final approval by HR' : stage.actor === 'dean' ? 'signed off by the Dean' : 'verified by your HoD'}`, body: claim.title, type: 'claim', link: `/claims/${claim.id}` });
+    notify(nextActors(fresh, stage.next), { title: stage.next === 'hr_verified' ? 'Claim approved for payment' : 'Part-time claim to approve', body: `${claim.lecturer_name}: ${claim.title}`, type: 'claim', link: `/claims/${claim.id}` });
+    notify(claim.lecturer_id, { title: `Claim ${stage.next === 'hr_verified' ? 'approved for payment by HR' : stage.actor === 'dean' ? 'signed off by the Dean' : 'verified by your HoD'}`, body: claim.title, type: 'claim', link: `/claims/${claim.id}` });
   }
   const voteLeft = vote ? round2(vote.amount - voteCharged(vote.id)) : null;
   res.json({

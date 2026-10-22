@@ -834,3 +834,144 @@ describe('Teaching operations, exams and profiles', async () => {
     assert.ok(preview.rates.length >= 2 && typeof preview.estimate === 'number');
   });
 });
+
+describe('Academic years, curriculum versions, leadership handover and rollover', () => {
+  const uniId = () => q.get("SELECT id FROM universities WHERE slug = 'demo-university'").id;
+  const userByEmail = (email) => q.get('SELECT * FROM users WHERE email = ?', email);
+  const today = () => zonedNow('Africa/Kampala').date;
+  const cs = () => q.get("SELECT * FROM departments WHERE code = 'CS'");
+
+  test('a Dean appoints a new HoD: the previous HoD goes back to lecturer and approvals follow the role', async () => {
+    const dean = await login('dean.fst@demo.edu');
+    const brian = userByEmail('brian.kato@demo.edu');
+    const oldHod = userByEmail('hod.cs@demo.edu');
+    const other = await login('dean.fbm@demo.edu');
+    assert.equal((await api('PUT', `/api/departments/${cs().id}`, { token: other, body: { hod_id: brian.id } })).status, 403, 'only the faculty Dean appoints its HoDs');
+
+    const res = await api('PUT', `/api/departments/${cs().id}`, { token: dean, body: { hod_id: brian.id } });
+    assert.equal(res.status, 200);
+    assert.equal(res.data.handed_over_from.id, oldHod.id);
+    assert.equal(userByEmail('brian.kato@demo.edu').role, 'hod');
+    assert.equal(userByEmail('hod.cs@demo.edu').role, 'lecturer');
+    assert.equal(userByEmail('hod.cs@demo.edu').department_id, cs().id, 'the former HoD keeps teaching in the department');
+    assert.equal(cs().hod_id, brian.id);
+
+    // A claim waiting for the HoD now waits for the new one.
+    const pending = q.get("SELECT id FROM pay_claims WHERE status = 'submitted' AND department_id = ? LIMIT 1", cs().id);
+    if (pending) {
+      assert.equal((await api('GET', `/api/claims/${pending.id}`, { token: await login('brian.kato@demo.edu') })).data.can_act, true);
+    }
+
+    // The administrator puts the original HoD back; Brian returns to lecturer.
+    const admin = await login('admin@demo.edu');
+    assert.equal((await api('PUT', `/api/departments/${cs().id}`, { token: admin, body: { hod_id: oldHod.id } })).status, 200);
+    assert.equal(userByEmail('brian.kato@demo.edu').role, 'lecturer');
+    assert.equal(userByEmail('hod.cs@demo.edu').role, 'hod');
+  });
+
+  test('curriculum versions: a new version starts as a copy, and classes keep the version they started on', async () => {
+    const hod = await login('hod.cs@demo.edu');
+    const bscs = q.get("SELECT * FROM programs WHERE code = 'BSCS'");
+    const v1 = q.get('SELECT * FROM curriculum_versions WHERE program_id = ? ORDER BY id LIMIT 1', bscs.id);
+    const v1Units = q.get('SELECT COUNT(*) AS n FROM program_course_units WHERE version_id = ?', v1.id).n;
+    const created = await api('POST', `/api/programs/${bscs.id}/versions`, { token: hod, body: { name: '2027 curriculum', starts_academic_year: '2027/2028' } });
+    assert.equal(created.status, 201);
+    assert.equal(created.data.unit_count, v1Units, 'starts as a copy of the latest version');
+
+    const unit = await api('POST', '/api/course-units', { token: hod, body: { code: 'CSC1199', name: 'Cloud Fundamentals', hours_per_week: 3, department_id: cs().id } });
+    assert.equal(unit.status, 201);
+    const link = await api('POST', `/api/programs/${bscs.id}/course-units`, { token: hod, body: { course_unit_id: unit.data.id, year_of_study: 1, semester: 1, version_id: created.data.id } });
+    assert.equal(link.status, 201);
+    const detailV2 = (await api('GET', `/api/programs/${bscs.id}`, { token: hod })).data;
+    assert.equal(detailV2.version.id, created.data.id, 'the latest version is shown by default');
+    assert.ok(detailV2.course_units.some((u) => u.code === 'CSC1199'));
+    const detailV1 = (await api('GET', `/api/programs/${bscs.id}?version_id=${v1.id}`, { token: hod })).data;
+    assert.ok(!detailV1.course_units.some((u) => u.code === 'CSC1199'), 'the running version is unchanged');
+    assert.equal(q.get("SELECT status FROM curriculum_versions WHERE id = ?", v1.id).status, 'phasing_out', 'still followed by running classes');
+
+    // Running classes follow version 1, so the new unit is not required of them this term.
+    const reqs = (await api('GET', '/api/allocations/requirements', { token: hod })).data;
+    assert.ok(!reqs.units.some((u) => u.code === 'CSC1199'));
+  });
+
+  test('academic years are created with their semesters, and dates are checked', async () => {
+    const admin = await login('admin@demo.edu');
+    assert.equal((await api('POST', '/api/academic-years', { token: admin, body: { academic_year: '2027-2028', semesters: [] } })).status, 400);
+    const overlap = await api('POST', '/api/academic-years', {
+      token: admin,
+      body: { academic_year: '2027/2028', semesters: [{ semester: 1, start_date: today(), end_date: addDays(today(), 100) }, { semester: 2, start_date: addDays(today(), 50), end_date: addDays(today(), 200) }] },
+    });
+    assert.equal(overlap.status, 400, 'semesters cannot overlap');
+    const made = await api('POST', '/api/academic-years', {
+      token: admin,
+      body: { academic_year: '2027/2028', semesters: [{ semester: 1, start_date: today(), end_date: addDays(today(), 110) }, { semester: 2, start_date: addDays(today(), 140), end_date: addDays(today(), 250) }] },
+    });
+    assert.equal(made.status, 201);
+    assert.deepEqual(made.data.map((t) => t.name), ['2027/2028 Semester 1', '2027/2028 Semester 2']);
+  });
+
+  test('when the new academic year starts, classes move up, finalists complete, and last year is drafted for the HoD', async () => {
+    const { rollover } = await import('../src/services/rollover.js');
+    const uid = uniId();
+    // A two-year programme so that one class finishes this time.
+    q.run("UPDATE programs SET duration_years = 2 WHERE code = 'BBA'");
+    const before = {
+      bscs1: q.get("SELECT * FROM classes WHERE name = 'BSCS Year 1' AND status = 'active'"),
+      bscs2: q.get("SELECT * FROM classes WHERE name = 'BSCS Year 2' AND status = 'active'"),
+      bba2: q.get("SELECT * FROM classes WHERE name = 'BBA Year 2' AND status = 'active'"),
+    };
+    const studentsInBscs1 = q.get("SELECT COUNT(*) AS n FROM users WHERE class_id = ? AND role = 'student'", before.bscs1.id).n;
+    const oldTerm = q.get("SELECT * FROM academic_terms WHERE university_id = ? AND academic_year = '2026/2027' AND semester = 1", uid);
+    const oldCsc1101 = q.get(
+      'SELECT a.* FROM allocations a JOIN course_units cu ON cu.id = a.course_unit_id WHERE a.term_id = ? AND cu.code = ?',
+      oldTerm.id,
+      'CSC1101',
+    );
+
+    const out = rollover(uid, today());
+    assert.equal(out.promoted.academic_year, '2027/2028');
+    assert.equal(out.current, '2027/2028 Semester 1', 'the new term becomes current on its start date');
+
+    const after = (id) => q.get('SELECT * FROM classes WHERE id = ?', id);
+    assert.equal(after(before.bscs1.id).year_of_study, 2);
+    assert.equal(after(before.bscs1.id).name, 'BSCS Year 2');
+    assert.equal(q.get("SELECT COUNT(*) AS n FROM users WHERE class_id = ? AND role = 'student'", before.bscs1.id).n, studentsInBscs1, 'students move up with their class');
+    assert.equal(after(before.bscs2.id).name, 'BSCS Year 3');
+    assert.equal(after(before.bba2.id).status, 'completed', 'finalists complete their programme');
+    const newYear1 = q.get("SELECT * FROM classes WHERE name = 'BSCS Year 1' AND status = 'active'");
+    assert.ok(newYear1 && newYear1.id !== before.bscs1.id, 'a new Year 1 class opens for the intake');
+    const latest = q.get("SELECT id FROM curriculum_versions WHERE program_id = ? ORDER BY id DESC LIMIT 1", newYear1.program_id).id;
+    assert.equal(newYear1.curriculum_version_id, latest, 'the new intake follows the latest curriculum');
+    assert.equal(after(before.bscs1.id).curriculum_version_id, before.bscs1.curriculum_version_id, 'running classes keep their curriculum');
+
+    // Last year's Semester 1 teaching is drafted with the same lecturers, matched to this year's classes.
+    const newTerm = q.get("SELECT * FROM academic_terms WHERE university_id = ? AND academic_year = '2027/2028' AND semester = 1", uid);
+    const draft = q.get(
+      `SELECT a.* FROM allocations a JOIN course_units cu ON cu.id = a.course_unit_id WHERE a.term_id = ? AND cu.code = 'CSC1101'`,
+      newTerm.id,
+    );
+    assert.equal(draft.status, 'draft');
+    assert.equal(draft.lecturer_id, oldCsc1101.lecturer_id);
+    assert.deepEqual(q.all('SELECT class_id FROM allocation_classes WHERE allocation_id = ?', draft.id).map((r) => r.class_id), [newYear1.id]);
+
+    // Running again changes nothing.
+    const again = rollover(uid, today());
+    assert.equal(again.promoted, null);
+    assert.equal(again.carried.length, 0);
+
+    // Drafts are not timetabled until the HoD confirms them.
+    const hod = await login('hod.cs@demo.edu');
+    const reqs = (await api('GET', `/api/allocations/requirements?term_id=${newTerm.id}`, { token: hod })).data;
+    assert.ok(reqs.units.some((u) => u.classes.some((c) => c.draft)));
+    const confirm = await api('POST', '/api/allocations/confirm-drafts', { token: hod, body: { term_id: newTerm.id } });
+    assert.equal(confirm.status, 200);
+    assert.ok(confirm.data.confirmed > 0);
+    assert.equal(q.get('SELECT status FROM allocations WHERE id = ?', draft.id).status, 'confirmed');
+
+    // Finished classes leave everyday lists but stay available.
+    const admin = await login('admin@demo.edu');
+    const active = (await api('GET', '/api/classes', { token: admin })).data;
+    assert.ok(!active.some((c) => c.id === before.bba2.id));
+    assert.ok((await api('GET', '/api/classes?status=completed', { token: admin })).data.some((c) => c.id === before.bba2.id));
+  });
+});

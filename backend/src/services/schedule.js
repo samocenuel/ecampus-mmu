@@ -6,6 +6,7 @@ import { autoCloseCheckins } from './checkin.js';
 import { notify } from './notify.js';
 import { occurrences, occurrencesForUser } from './occurrences.js';
 import { runMissedLectureAlerts } from './ops.js';
+import { rolloverAll } from './rollover.js';
 import { listSessions } from './timetable.js';
 
 /** Weekly sessions relevant to a user: what they teach (staff) or attend (students). */
@@ -98,10 +99,14 @@ export function startReminderLoop() {
     }
     try {
       for (const uni of q.all('SELECT id, timezone FROM universities WHERE active = 1')) autoCloseCheckins(uni.id, zonedNow(uni.timezone));
-      if (ticks++ % 10 === 0) runMissedLectureAlerts();
+      if (ticks % 10 === 0) runMissedLectureAlerts();
     } catch (err) {
       console.error('[operations]', err);
     }
+    // Terms follow their dates, classes move up at the start of a new academic year, and each
+    // semester's allocations are drafted from last year (checked at start-up, then hourly).
+    if (ticks % 60 === 0) rolloverAll();
+    ticks++;
   };
   tick();
   setInterval(tick, config.reminderIntervalMs).unref();

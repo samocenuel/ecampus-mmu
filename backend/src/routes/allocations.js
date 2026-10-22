@@ -205,7 +205,9 @@ router.put('/:id', requireRole(...MANAGER_ROLES), (req, res) => {
   }
 
   tx(() => {
+    // Editing a draft copied from last year means the HoD has reviewed it.
     update('allocations', existing.id, {
+      status: 'confirmed',
       lecturer_id: lecturerId,
       hours_per_week: toInt(req.body.hours_per_week) || existing.hours_per_week,
       notes: req.body.notes !== undefined ? req.body.notes : existing.notes,
@@ -224,6 +226,45 @@ router.put('/:id', requireRole(...MANAGER_ROLES), (req, res) => {
     });
   }
   res.json(listAllocations(req.uid, ['a.id = ?'], [existing.id])[0]);
+});
+
+const canManageAllocation = (user, a) =>
+  a.department_id ? canManageDepartment(user, a.department_id) : user.role === 'admin' || a.classes.every((c) => canManageDepartment(user, c.department_id));
+
+function confirmDraft(user, a) {
+  q.run("UPDATE allocations SET status = 'confirmed' WHERE id = ?", a.id);
+  notify(a.lecturer_id, {
+    title: `Teaching allocation confirmed: ${a.code}`,
+    body: `${a.course_name} for ${a.classes.map((c) => c.name).join(', ')}.`,
+    type: 'allocation',
+    link: '/my-timetable',
+  });
+}
+
+/** Confirm one draft allocation (copied from last year) as it is. */
+router.post('/:id/confirm', requireRole(...MANAGER_ROLES), (req, res) => {
+  const a = allocationContext(toInt(req.params.id), req.uid);
+  if (!a) throw notFound('Allocation');
+  if (!canManageAllocation(req.user, a)) throw forbidden();
+  if (a.status !== 'draft') throw badRequest('This allocation is already confirmed');
+  confirmDraft(req.user, a);
+  res.json(listAllocations(req.uid, ['a.id = ?'], [a.id])[0]);
+});
+
+/** Confirm every draft allocation of a term that the user manages. */
+router.post('/confirm-drafts', requireRole(...MANAGER_ROLES), (req, res) => {
+  const term = resolveTerm(req.uid, req.body?.term_id);
+  if (!term) throw badRequest('Choose a term');
+  let confirmed = 0;
+  tx(() => {
+    for (const { id } of q.all("SELECT id FROM allocations WHERE term_id = ? AND status = 'draft'", term.id)) {
+      const a = allocationContext(id, req.uid);
+      if (!canManageAllocation(req.user, a)) continue;
+      confirmDraft(req.user, a);
+      confirmed++;
+    }
+  });
+  res.json({ ok: true, confirmed });
 });
 
 router.delete('/:id', requireRole(...MANAGER_ROLES), (req, res) => {

@@ -9,7 +9,7 @@ export const STAGES = {
   submitted: { label: 'Awaiting HoD verification', actor: 'hod', next: 'hod_approved', action: 'Verify' },
   hod_approved: { label: 'Awaiting Dean sign-off', actor: 'dean', next: 'dean_approved', action: 'Sign off and charge vote' },
   dean_approved: { label: 'Awaiting HR approval', actor: 'hr', next: 'hr_verified', action: 'Final approval' },
-  hr_verified: { label: 'Cleared, awaiting payment', actor: 'hr', next: 'paid', action: 'Record payment' },
+  hr_verified: { label: 'Approved for payment', actor: 'hr', next: 'paid', action: 'Record payment' },
 };
 
 /** What a vote has committed: claims the Vote Controller signed off, up to payment. */

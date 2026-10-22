@@ -4,7 +4,7 @@ import { api } from '../../api';
 import { useAuth } from '../../auth';
 import { useFeedback } from '../../components/feedback';
 import { ResourcePage } from '../../components/ResourcePage';
-import { Badge, Button, DataTable, EmptyState, Field, IconButton, Modal, Select, Spinner } from '../../components/ui';
+import { Badge, Button, Checkbox, DataTable, EmptyState, Field, IconButton, Modal, Select, Spinner } from '../../components/ui';
 import { useFetch } from '../../hooks';
 
 function StudentsDialog({ cls, onClose }: { cls: any; onClose: () => void }) {
@@ -81,6 +81,7 @@ export default function Classes() {
   const [rep, setRep] = useState<{ cls: any; reload: () => void } | null>(null);
   const canManage = hasRole('admin', 'dean', 'hod');
   const year = new Date().getFullYear();
+  const [finished, setFinished] = useState(false);
 
   return (
     <>
@@ -88,7 +89,15 @@ export default function Classes() {
         title="Classes"
         subtitle="A class is a cohort of students in a programme and year of study. Each class can have a class representative."
         noun="Class"
+        key={finished ? 'finished' : 'running'}
         endpoint="/api/classes"
+        query={finished ? '?status=completed' : ''}
+        before={() => (
+          <div className="row gap-sm wrap" style={{ marginBottom: 12 }}>
+            <Checkbox label="Show classes that have finished their programme" checked={finished} onChange={setFinished} />
+            <span className="muted small">Classes move up a year automatically when a new academic year's Semester 1 starts.</span>
+          </div>
+        )}
         searchKeys={['name', 'program_code', 'department_name', 'class_rep_name']}
         canCreate={canManage}
         canEdit={() => canManage}
@@ -96,7 +105,8 @@ export default function Classes() {
         columns={[
           { key: 'name', header: 'Class', render: (c: any) => <><strong>{c.name}</strong><div className="muted small">{c.program_name}</div></> },
           { key: 'year_of_study', header: 'Year', align: 'center' },
-          { key: 'academic_year', header: 'Intake', hideOnMobile: true },
+          { key: 'academic_year', header: 'Academic year', hideOnMobile: true, render: (c: any) => <>{c.academic_year}{c.status === 'completed' ? <> <Badge>Completed</Badge></> : null}</> },
+          { key: 'curriculum_version_name', header: 'Curriculum', hideOnMobile: true },
           { key: 'student_count', header: 'Students', align: 'right', render: (c: any) => <>{c.student_count}<span className="muted small"> / {c.expected_size} expected</span></> },
           { key: 'class_rep_name', header: 'Class rep', render: (c: any) => c.class_rep_name || <Badge tone="warning">Not appointed</Badge> },
         ]}

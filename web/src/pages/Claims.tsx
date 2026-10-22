@@ -23,7 +23,7 @@ const STEPS = [
   ['submitted', 'Submitted by lecturer'],
   ['hod_approved', 'Verified by HoD'],
   ['dean_approved', 'Signed off by Dean'],
-  ['hr_verified', 'Final approval (HR)'],
+  ['hr_verified', 'Approved for payment (HR)'],
   ['paid', 'Paid'],
 ] as const;
 const CERTIFY = "I certify that the information provided herein above is correct to the best of my knowledge and the claim herein truly conforms to the established expenditure estimates and the finance regulations governing the university.";
@@ -539,7 +539,7 @@ export default function Claims() {
       {summary && (
         <div className="stat-grid" style={{ marginBottom: 16 }}>
           {approver && <StatCard label="Awaiting you" value={summary.awaiting_me} hint={money(summary.awaiting_me_total, currency)} tone={summary.awaiting_me ? 'warning' : undefined} icon={<Wallet size={20} />} />}
-          {summary.awaiting_payment !== undefined && <StatCard label="Verified, to pay" value={summary.awaiting_payment} />}
+          {summary.awaiting_payment !== undefined && <StatCard label="Approved for payment" value={summary.awaiting_payment} />}
           {partTimer && <StatCard label="My open claims" value={summary.mine.open} hint={summary.mine.returned ? `${summary.mine.returned} returned to you` : undefined} />}
           {partTimer && <StatCard label="Paid to me" value={money(summary.mine.paid_total, currency)} tone="success" />}
         </div>
@@ -722,7 +722,7 @@ function Decide({ claim, mode, onClose, onDone }: { claim: any; mode: 'approve' 
       }
       if (signing && !chosen) throw new Error('Choose the vote this claim is charged to');
       const r = await api(`/api/claims/${claim.id}/${mode}`, { method: 'POST', body: { note, payment_reference: reference, vote_id: chosen } });
-      toast(mode === 'reject' ? 'Claim returned to the lecturer' : paying ? 'Payment recorded' : claim.status === 'dean_approved' ? 'Final approval given; print the requisition form' : 'Claim signed off and passed on');
+      toast(mode === 'reject' ? 'Claim returned to the lecturer' : paying ? 'Payment recorded' : claim.status === 'dean_approved' ? 'Approved for payment; print the requisition form' : 'Claim signed off and passed on');
       if (r?.budget_warning) toast(r.budget_warning, 'error');
       if (r?.vote_warning) toast(r.vote_warning, 'error');
       onDone();
@@ -783,7 +783,7 @@ function Decide({ claim, mode, onClose, onDone }: { claim: any; mode: 'approve' 
 }
 
 const EVENT_LABEL: Record<string, string> = {
-  created: 'Draft created', submitted: 'Signed off and submitted', resubmitted: 'Resubmitted', approved: 'Approved', verified: 'Final approval by HR', paid: 'Payment recorded', returned: 'Returned for correction',
+  created: 'Draft created', submitted: 'Signed off and submitted', resubmitted: 'Resubmitted', approved: 'Approved', verified: 'Approved for payment by HR', paid: 'Payment recorded', returned: 'Returned for correction',
 };
 
 export function ClaimDetail() {
@@ -910,7 +910,7 @@ export function ClaimDetail() {
         )}
         {!claim.teaching_rate && <Alert tone="warning">The Dean has not set a teaching rate for this faculty yet, so teaching hours can't be priced.</Alert>}
         {claim.status === 'hr_verified' && (
-          <Alert tone="success" title="Cleared by HR">
+          <Alert tone="success" title="Approved for payment">
             The requisition form is ready to print and submit to Finance.
           </Alert>
         )}

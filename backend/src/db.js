@@ -97,13 +97,28 @@ CREATE TABLE IF NOT EXISTS course_units (
   UNIQUE (university_id, code)
 );
 
+-- A programme's curriculum changes over time: each version lists its course units by year and
+-- semester. New intakes follow the latest version; running classes keep theirs until they finish.
+CREATE TABLE IF NOT EXISTS curriculum_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  university_id INTEGER NOT NULL REFERENCES universities(id) ON DELETE CASCADE,
+  program_id INTEGER NOT NULL REFERENCES programs(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  starts_academic_year TEXT,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','phasing_out','retired')),
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_cv_program ON curriculum_versions(program_id);
+
 CREATE TABLE IF NOT EXISTS program_course_units (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   program_id INTEGER NOT NULL REFERENCES programs(id) ON DELETE CASCADE,
+  version_id INTEGER NOT NULL REFERENCES curriculum_versions(id) ON DELETE CASCADE,
   course_unit_id INTEGER NOT NULL REFERENCES course_units(id) ON DELETE CASCADE,
   year_of_study INTEGER NOT NULL DEFAULT 1,
   semester INTEGER NOT NULL DEFAULT 1,
-  UNIQUE (program_id, course_unit_id)
+  UNIQUE (version_id, course_unit_id)
 );
 CREATE INDEX IF NOT EXISTS idx_pcu_cu ON program_course_units(course_unit_id);
 
@@ -518,10 +533,15 @@ const ADDED_COLUMNS = {
     exam_min_attendance: 'INTEGER NOT NULL DEFAULT 75',
     coursework_min_percent: 'INTEGER NOT NULL DEFAULT 50',
     claims_require_checkin: 'INTEGER NOT NULL DEFAULT 0',
+    // The academic year classes are in; when a later year's Semester 1 starts, classes move up.
+    progressed_year: 'TEXT',
   },
   users: { calendar_token: 'TEXT', must_change_password: 'INTEGER NOT NULL DEFAULT 0', photo_path: 'TEXT' },
   pay_claims: { vote_id: 'INTEGER', verify_code: 'TEXT' },
   programs: { coursework_max: 'REAL NOT NULL DEFAULT 40' },
+  classes: { curriculum_version_id: 'INTEGER', status: "TEXT NOT NULL DEFAULT 'active'", completed_at: 'TEXT', intake_year: 'TEXT' },
+  allocations: { status: "TEXT NOT NULL DEFAULT 'confirmed'", carried_from: 'INTEGER' },
+  academic_terms: { carried_over_at: 'TEXT' },
   attendance_registers: { source: "TEXT NOT NULL DEFAULT 'rep'", self_checkins: 'INTEGER NOT NULL DEFAULT 0' },
   attendance_records: { method: 'TEXT' },
   pay_rates: { code: 'TEXT', program_level: 'TEXT' },
@@ -587,11 +607,66 @@ function migrate() {
   if (!uniCols.includes('currency')) db.exec("ALTER TABLE universities ADD COLUMN currency TEXT NOT NULL DEFAULT 'UGX'");
 }
 
+/**
+ * Curriculum versions (added after the first releases): every programme's existing curriculum
+ * becomes its "Version 1", its classes follow it, and the year the classes are in is recorded so
+ * that nothing moves up until the next academic year actually starts.
+ */
+function migrateCurriculumVersions() {
+  const cols = db.prepare('PRAGMA table_info(program_course_units)').all().map((c) => c.name);
+  if (!cols.includes('version_id')) {
+    db.exec('PRAGMA foreign_keys = OFF');
+    db.exec('BEGIN');
+    try {
+      const add = db.prepare("INSERT INTO curriculum_versions (university_id, program_id, name, status) VALUES (?, ?, 'Version 1', 'active')");
+      for (const prog of db.prepare('SELECT id, university_id FROM programs').all()) add.run(prog.university_id, prog.id);
+      db.exec(`
+        CREATE TABLE program_course_units_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          program_id INTEGER NOT NULL REFERENCES programs(id) ON DELETE CASCADE,
+          version_id INTEGER NOT NULL REFERENCES curriculum_versions(id) ON DELETE CASCADE,
+          course_unit_id INTEGER NOT NULL REFERENCES course_units(id) ON DELETE CASCADE,
+          year_of_study INTEGER NOT NULL DEFAULT 1,
+          semester INTEGER NOT NULL DEFAULT 1,
+          UNIQUE (version_id, course_unit_id)
+        );
+        INSERT INTO program_course_units_new (id, program_id, version_id, course_unit_id, year_of_study, semester)
+          SELECT pcu.id, pcu.program_id, (SELECT MIN(v.id) FROM curriculum_versions v WHERE v.program_id = pcu.program_id),
+                 pcu.course_unit_id, pcu.year_of_study, pcu.semester
+            FROM program_course_units pcu;
+        DROP TABLE program_course_units;
+        ALTER TABLE program_course_units_new RENAME TO program_course_units;
+        CREATE INDEX IF NOT EXISTS idx_pcu_cu ON program_course_units(course_unit_id);
+      `);
+      const broken = db.prepare('PRAGMA foreign_key_check').all();
+      if (broken.length) throw new Error(`curriculum migration left ${broken.length} broken references`);
+      db.exec('COMMIT');
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    } finally {
+      db.exec('PRAGMA foreign_keys = ON');
+    }
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_pcu_version ON program_course_units(version_id, year_of_study, semester)');
+  // Programmes without a version yet (e.g. created by an older release after the rebuild) get one.
+  for (const prog of db.prepare('SELECT id, university_id FROM programs p WHERE NOT EXISTS (SELECT 1 FROM curriculum_versions v WHERE v.program_id = p.id)').all()) {
+    db.prepare("INSERT INTO curriculum_versions (university_id, program_id, name, status) VALUES (?, ?, 'Version 1', 'active')").run(prog.university_id, prog.id);
+  }
+  db.exec(`UPDATE classes SET curriculum_version_id = (SELECT MIN(v.id) FROM curriculum_versions v WHERE v.program_id = classes.program_id)
+             WHERE curriculum_version_id IS NULL`);
+  db.exec(`UPDATE universities SET progressed_year = COALESCE(
+             (SELECT academic_year FROM academic_terms t WHERE t.university_id = universities.id AND t.is_current = 1 AND t.academic_year IS NOT NULL LIMIT 1),
+             (SELECT MAX(academic_year) FROM academic_terms t WHERE t.university_id = universities.id AND t.start_date <= date('now')))
+           WHERE progressed_year IS NULL`);
+}
+
 db.exec(SCHEMA);
 migrate();
 db.exec(PAY_SCHEMA);
 db.exec(OPS_SCHEMA);
 addColumns();
+migrateCurriculumVersions();
 
 // node:sqlite only binds null/number/bigint/string/bytes, so normalise JS values first.
 const bindable = (params) =>

@@ -4,6 +4,7 @@ import { MANAGER_ROLES, requireRole } from '../auth.js';
 import { insert, q, tx, update } from '../db.js';
 import { assertManageDepartment, canManageDepartment, courseUnitScope, managedDepartmentIds, placeholders, visibleDepartmentIds } from '../scope.js';
 import { crossCuttingUnitCount } from '../services/allocation-rules.js';
+import { ensureVersion, latestVersion, refreshVersionStatuses } from '../services/curriculum.js';
 import { notify } from '../services/notify.js';
 import { badRequest, forbidden, needsConfirmation, notFound, pick, requireFields, toInt, truthy } from '../util.js';
 
@@ -19,7 +20,7 @@ const one = (sql, what, ...params) => {
 
 const programSelect = `
   SELECT p.*, d.name AS department_name, d.faculty_id, f.name AS faculty_name,
-         (SELECT COUNT(*) FROM program_course_units x WHERE x.program_id = p.id) AS course_unit_count,
+         (SELECT COUNT(*) FROM program_course_units x WHERE x.version_id = (SELECT MAX(v.id) FROM curriculum_versions v WHERE v.program_id = p.id AND v.status <> 'retired')) AS course_unit_count,
          (SELECT COUNT(*) FROM classes c WHERE c.program_id = p.id) AS class_count
     FROM programs p JOIN departments d ON d.id = p.department_id JOIN faculties f ON f.id = d.faculty_id`;
 
@@ -46,18 +47,93 @@ router.get('/programs/:id', (req, res) => {
   const program = one(`${programSelect} WHERE p.id = ? AND p.university_id = ?`, 'Programme', req.params.id, req.uid);
   const depts = visibleDepartmentIds(req.user);
   if (depts !== null && !depts.includes(program.department_id)) throw notFound('Programme');
-  program.course_units = q.all(
-    `SELECT cu.*, pcu.year_of_study, pcu.semester,
-            (SELECT COUNT(*) FROM program_course_units o WHERE o.course_unit_id = cu.id) AS program_count
-       FROM program_course_units pcu JOIN course_units cu ON cu.id = pcu.course_unit_id
-      WHERE pcu.program_id = ? ORDER BY pcu.year_of_study, pcu.semester, cu.code`,
+  program.versions = versionsOf(program.id);
+  const latest = latestVersion(program.id);
+  const version = (toInt(req.query.version_id) && program.versions.find((v) => v.id === toInt(req.query.version_id))) || program.versions.find((v) => v.id === latest?.id) || null;
+  program.version = version;
+  program.course_units = version
+    ? q.all(
+        `SELECT cu.*, pcu.year_of_study, pcu.semester,
+                (SELECT COUNT(DISTINCT o.program_id) FROM program_course_units o WHERE o.course_unit_id = cu.id) AS program_count
+           FROM program_course_units pcu JOIN course_units cu ON cu.id = pcu.course_unit_id
+          WHERE pcu.version_id = ? ORDER BY pcu.year_of_study, pcu.semester, cu.code`,
+        version.id,
+      )
+    : [];
+  program.classes = q.all(
+    `SELECT c.*, v.name AS curriculum_version_name FROM classes c LEFT JOIN curriculum_versions v ON v.id = c.curriculum_version_id
+      WHERE c.program_id = ? ORDER BY c.status = 'completed', c.year_of_study, c.name`,
     program.id,
   );
-  program.classes = q.all('SELECT * FROM classes WHERE program_id = ? ORDER BY year_of_study, name', program.id);
   res.json(program);
 });
 
 const PROGRAM_FIELDS = ['department_id', 'name', 'code', 'level', 'duration_years', 'coursework_max'];
+
+/** A programme's curriculum versions with how many units and running classes each has. */
+function versionsOf(programId) {
+  return q.all(
+    `SELECT v.*, (SELECT COUNT(*) FROM program_course_units x WHERE x.version_id = v.id) AS unit_count,
+            (SELECT COUNT(*) FROM classes c WHERE c.curriculum_version_id = v.id AND c.status = 'active') AS class_count
+       FROM curriculum_versions v WHERE v.program_id = ? ORDER BY v.id DESC`,
+    programId,
+  );
+}
+
+function versionOf(program, versionId) {
+  if (!versionId) return ensureVersion(program);
+  const v = q.get('SELECT * FROM curriculum_versions WHERE id = ? AND program_id = ?', toInt(versionId), program.id);
+  if (!v) throw badRequest('That curriculum version does not belong to this programme');
+  if (v.status === 'retired') throw badRequest(`${v.name} is retired; edit a current version`);
+  return v;
+}
+
+/** List a programme's curriculum versions. */
+router.get('/programs/:id/versions', (req, res) => {
+  const program = one('SELECT * FROM programs WHERE id = ? AND university_id = ?', 'Programme', req.params.id, req.uid);
+  res.json(versionsOf(program.id));
+});
+
+/**
+ * A new curriculum version, starting as a copy of the latest one. New intakes follow it; classes
+ * already running keep their version until they finish.
+ */
+router.post('/programs/:id/versions', requireRole(...MANAGER_ROLES), (req, res) => {
+  requireFields(req.body, ['name']);
+  const program = one('SELECT * FROM programs WHERE id = ? AND university_id = ?', 'Programme', req.params.id, req.uid);
+  assertManageDepartment(req.user, program.department_id);
+  const year = String(req.body.starts_academic_year || '').trim() || null;
+  if (year && !/^\d{4}\/\d{4}$/.test(year)) throw badRequest('Academic year must look like 2027/2028');
+  const from = latestVersion(program.id);
+  const id = tx(() => {
+    const vid = insert('curriculum_versions', { university_id: req.uid, program_id: program.id, name: String(req.body.name).trim(), starts_academic_year: year, status: 'active', created_by: req.user.id });
+    if (from && req.body.copy !== false) {
+      q.run(
+        `INSERT INTO program_course_units (program_id, version_id, course_unit_id, year_of_study, semester)
+           SELECT program_id, ?, course_unit_id, year_of_study, semester FROM program_course_units WHERE version_id = ?`,
+        vid,
+        from.id,
+      );
+    }
+    refreshVersionStatuses(req.uid);
+    return vid;
+  });
+  res.status(201).json(versionsOf(program.id).find((v) => v.id === id));
+});
+
+router.put('/curriculum-versions/:id', requireRole(...MANAGER_ROLES), (req, res) => {
+  const v = one('SELECT * FROM curriculum_versions WHERE id = ? AND university_id = ?', 'Curriculum version', req.params.id, req.uid);
+  const program = q.get('SELECT * FROM programs WHERE id = ?', v.program_id);
+  assertManageDepartment(req.user, program.department_id);
+  const data = pick(req.body, ['name', 'starts_academic_year', 'status']);
+  if (data.status !== undefined && !['active', 'phasing_out', 'retired'].includes(data.status)) throw badRequest('Status must be active, phasing_out or retired');
+  if (data.status === 'retired' && q.get("SELECT 1 FROM classes WHERE curriculum_version_id = ? AND status = 'active'", v.id)) {
+    throw badRequest('Classes still follow this version; it retires by itself when they finish');
+  }
+  if (data.starts_academic_year && !/^\d{4}\/\d{4}$/.test(data.starts_academic_year)) throw badRequest('Academic year must look like 2027/2028');
+  update('curriculum_versions', v.id, data);
+  res.json(versionsOf(program.id).find((x) => x.id === v.id));
+});
 
 /** Coursework total per programme (e.g. 40), set by the HoD; marks are converted to it. */
 function checkCourseworkMax(data) {
@@ -74,7 +150,11 @@ router.post('/programs', requireRole(...MANAGER_ROLES), (req, res) => {
   one('SELECT id FROM departments WHERE id = ? AND university_id = ?', 'Department', data.department_id, req.uid);
   assertManageDepartment(req.user, data.department_id);
   data.code = String(data.code).trim().toUpperCase();
-  const id = insert('programs', { ...data, university_id: req.uid });
+  const id = tx(() => {
+    const pid = insert('programs', { ...data, university_id: req.uid });
+    ensureVersion({ id: pid, university_id: req.uid });
+    return pid;
+  });
   res.status(201).json(q.get(`${programSelect} WHERE p.id = ?`, id));
 });
 
@@ -115,16 +195,18 @@ function assertLinkable(courseUnit, programId) {
   }
 }
 
-function linkCourseUnit(program, courseUnit, yearOfStudy, semester) {
+function linkCourseUnit(program, courseUnit, yearOfStudy, semester, versionId = null) {
   const year = toInt(yearOfStudy) || 1;
   const sem = toInt(semester) || 1;
   if (year < 1 || year > (program.duration_years || 7)) throw badRequest(`Year of study must be between 1 and ${program.duration_years}`);
   if (![1, 2, 3].includes(sem)) throw badRequest('Semester must be 1, 2 or 3');
   assertLinkable(courseUnit, program.id);
+  const version = versionOf(program, versionId);
   q.run(
-    `INSERT INTO program_course_units (program_id, course_unit_id, year_of_study, semester) VALUES (?, ?, ?, ?)
-       ON CONFLICT (program_id, course_unit_id) DO UPDATE SET year_of_study = excluded.year_of_study, semester = excluded.semester`,
+    `INSERT INTO program_course_units (program_id, version_id, course_unit_id, year_of_study, semester) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (version_id, course_unit_id) DO UPDATE SET year_of_study = excluded.year_of_study, semester = excluded.semester`,
     program.id,
+    version.id,
     courseUnit.id,
     year,
     sem,
@@ -136,14 +218,15 @@ router.post('/programs/:id/course-units', requireRole(...MANAGER_ROLES), (req, r
   const program = one('SELECT * FROM programs WHERE id = ? AND university_id = ?', 'Programme', req.params.id, req.uid);
   assertManageDepartment(req.user, program.department_id);
   const cu = one('SELECT * FROM course_units WHERE id = ? AND university_id = ?', 'Course unit', req.body.course_unit_id, req.uid);
-  linkCourseUnit(program, cu, req.body.year_of_study, req.body.semester);
+  linkCourseUnit(program, cu, req.body.year_of_study, req.body.semester, req.body.version_id);
   res.status(201).json({ ok: true });
 });
 
 router.delete('/programs/:id/course-units/:cuId', requireRole(...MANAGER_ROLES), (req, res) => {
   const program = one('SELECT * FROM programs WHERE id = ? AND university_id = ?', 'Programme', req.params.id, req.uid);
   assertManageDepartment(req.user, program.department_id);
-  q.run('DELETE FROM program_course_units WHERE program_id = ? AND course_unit_id = ?', program.id, req.params.cuId);
+  const version = versionOf(program, req.query.version_id);
+  q.run('DELETE FROM program_course_units WHERE version_id = ? AND course_unit_id = ?', version.id, req.params.cuId);
   res.json({ ok: true });
 });
 
@@ -151,7 +234,7 @@ router.delete('/programs/:id/course-units/:cuId', requireRole(...MANAGER_ROLES),
 
 const courseUnitSelect = `
   SELECT cu.*, d.name AS department_name,
-         (SELECT COUNT(*) FROM program_course_units x WHERE x.course_unit_id = cu.id) AS program_count
+         (SELECT COUNT(DISTINCT x.program_id) FROM program_course_units x WHERE x.course_unit_id = cu.id) AS program_count
     FROM course_units cu LEFT JOIN departments d ON d.id = cu.department_id`;
 
 function withPrograms(units) {
@@ -160,7 +243,9 @@ function withPrograms(units) {
   const links = q.all(
     `SELECT pcu.course_unit_id, pcu.year_of_study, pcu.semester, p.id, p.code, p.name, p.department_id
        FROM program_course_units pcu JOIN programs p ON p.id = pcu.program_id
-      WHERE pcu.course_unit_id IN (${placeholders(ids)}) ORDER BY p.code`,
+      WHERE pcu.course_unit_id IN (${placeholders(ids)})
+        AND pcu.version_id = (SELECT MAX(v.id) FROM curriculum_versions v WHERE v.program_id = pcu.program_id AND v.status <> 'retired')
+      ORDER BY p.code`,
     ...ids,
   );
   return units.map((u) => ({
@@ -285,7 +370,7 @@ router.put('/course-units/:id', requireRole(...MANAGER_ROLES), (req, res) => {
   const data = cleanCourseUnit(req.uid, req.body);
   if ('department_id' in data) assertManageCourseUnit(req.user, data.department_id);
   if (data.is_cross_cutting === 0 && cu.is_cross_cutting) {
-    const n = q.get('SELECT COUNT(*) AS n FROM program_course_units WHERE course_unit_id = ?', cu.id).n;
+    const n = q.get('SELECT COUNT(DISTINCT program_id) AS n FROM program_course_units WHERE course_unit_id = ?', cu.id).n;
     if (n > 1) throw badRequest(`${cu.code} is used by ${n} programmes, so it must stay cross-cutting`);
   }
   update('course_units', cu.id, data);
@@ -303,6 +388,7 @@ router.delete('/course-units/:id', requireRole(...MANAGER_ROLES), (req, res) => 
 
 const classSelect = `
   SELECT c.*, p.code AS program_code, p.name AS program_name, p.department_id, d.name AS department_name,
+         (SELECT v.name FROM curriculum_versions v WHERE v.id = c.curriculum_version_id) AS curriculum_version_name,
          r.name AS class_rep_name, r.email AS class_rep_email,
          (SELECT COUNT(*) FROM users s WHERE s.class_id = c.id AND s.role = 'student' AND s.active = 1) AS student_count
     FROM classes c JOIN programs p ON p.id = c.program_id JOIN departments d ON d.id = p.department_id
@@ -311,6 +397,9 @@ const classSelect = `
 router.get('/classes', (req, res) => {
   const where = ['c.university_id = ?'];
   const params = [req.uid];
+  // Classes that finished their programme are kept for history but left out of everyday lists.
+  if (req.query.status === 'completed') where.push("c.status = 'completed'");
+  else if (!truthy(req.query.include_completed)) where.push("c.status = 'active'");
   if (req.query.program_id) {
     where.push('c.program_id = ?');
     params.push(toInt(req.query.program_id));
@@ -361,14 +450,22 @@ router.get('/classes/:id/students', (req, res) => {
   );
 });
 
-const CLASS_FIELDS = ['program_id', 'name', 'year_of_study', 'academic_year', 'expected_size'];
+const CLASS_FIELDS = ['program_id', 'name', 'year_of_study', 'academic_year', 'expected_size', 'curriculum_version_id'];
+
+function classVersion(program, versionId) {
+  if (!versionId) return latestVersion(program.id)?.id ?? ensureVersion(program).id;
+  const v = q.get('SELECT * FROM curriculum_versions WHERE id = ? AND program_id = ?', toInt(versionId), program.id);
+  if (!v) throw badRequest('Choose one of the programme\'s curriculum versions');
+  return v.id;
+}
 
 router.post('/classes', requireRole(...MANAGER_ROLES), (req, res) => {
   requireFields(req.body, ['program_id', 'name']);
   const data = pick(req.body, CLASS_FIELDS);
   const program = one('SELECT * FROM programs WHERE id = ? AND university_id = ?', 'Programme', data.program_id, req.uid);
   assertManageDepartment(req.user, program.department_id);
-  const id = insert('classes', { ...data, university_id: req.uid });
+  data.curriculum_version_id = classVersion(program, data.curriculum_version_id);
+  const id = insert('classes', { ...data, university_id: req.uid, intake_year: data.academic_year || null });
   res.status(201).json(getClass(req.uid, id));
 });
 
@@ -380,7 +477,12 @@ router.put('/classes/:id', requireRole(...MANAGER_ROLES), (req, res) => {
     const program = one('SELECT * FROM programs WHERE id = ? AND university_id = ?', 'Programme', data.program_id, req.uid);
     assertManageDepartment(req.user, program.department_id);
   }
+  if (data.curriculum_version_id !== undefined || data.program_id) {
+    const program = q.get('SELECT * FROM programs WHERE id = ?', data.program_id || cls.program_id);
+    data.curriculum_version_id = classVersion(program, data.curriculum_version_id ?? (data.program_id && data.program_id !== cls.program_id ? null : cls.curriculum_version_id));
+  }
   update('classes', cls.id, data);
+  refreshVersionStatuses(req.uid);
   res.json(getClass(req.uid, cls.id));
 });
 
@@ -453,6 +555,39 @@ router.get('/terms', (req, res) => {
 function setCurrent(uid, termId) {
   q.run('UPDATE academic_terms SET is_current = (id = ?) WHERE university_id = ?', termId, uid);
 }
+
+/**
+ * A new academic year: its semesters with their start and end dates, named after the year
+ * (e.g. "2027/2028 Semester 1"). When Semester 1 starts, classes move up a year by themselves.
+ */
+router.post('/academic-years', requireRole('admin'), (req, res) => {
+  requireFields(req.body, ['academic_year', 'semesters']);
+  const year = String(req.body.academic_year).trim();
+  const m = /^(\d{4})\/(\d{4})$/.exec(year);
+  if (!m || Number(m[2]) !== Number(m[1]) + 1) throw badRequest('Academic year must look like 2027/2028');
+  const semesters = (Array.isArray(req.body.semesters) ? req.body.semesters : [])
+    .map((x) => ({ semester: toInt(x.semester), start_date: x.start_date, end_date: x.end_date }))
+    .sort((a, b) => a.semester - b.semester);
+  if (!semesters.length) throw badRequest('Add at least one semester');
+  const isDate = (d) => /^\d{4}-\d{2}-\d{2}$/.test(d || '');
+  let last = null;
+  for (const x of semesters) {
+    if (![1, 2, 3].includes(x.semester)) throw badRequest('Semesters are numbered 1 to 3');
+    if (!isDate(x.start_date) || !isDate(x.end_date) || x.start_date >= x.end_date) throw badRequest(`Semester ${x.semester} needs a start date before its end date`);
+    if (last && x.start_date <= last.end_date) throw badRequest(`Semester ${x.semester} must start after Semester ${last.semester} ends`);
+    if (q.get('SELECT 1 FROM academic_terms WHERE university_id = ? AND academic_year = ? AND semester = ?', req.uid, year, x.semester)) {
+      throw badRequest(`${year} Semester ${x.semester} already exists`);
+    }
+    last = x;
+  }
+  const ids = tx(() =>
+    semesters.map((x) =>
+      insert('academic_terms', { university_id: req.uid, name: `${year} Semester ${x.semester}`, academic_year: year, semester: x.semester, start_date: x.start_date, end_date: x.end_date }),
+    ),
+  );
+  if (!q.get('SELECT 1 FROM academic_terms WHERE university_id = ? AND is_current = 1', req.uid)) setCurrent(req.uid, ids[0]);
+  res.status(201).json(q.all(`SELECT * FROM academic_terms WHERE id IN (${placeholders(ids)}) ORDER BY semester`, ...ids));
+});
 
 router.post('/terms', requireRole('admin'), (req, res) => {
   requireFields(req.body, ['name', 'semester']);

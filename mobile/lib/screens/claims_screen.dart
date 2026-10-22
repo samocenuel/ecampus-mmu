@@ -283,7 +283,7 @@ class _ClaimDetailScreenState extends State<ClaimDetailScreen> {
     final api = context.read<AppState>().api;
     await _run(
       () async => api.post('/api/claims/${claim['id']}/$mode', {'note': note.text, 'payment_reference': reference.text, 'vote_id': ?voteId}),
-      mode == 'reject' ? 'Claim returned to the lecturer' : (paying ? 'Payment recorded' : claim['status'] == 'dean_approved' ? 'Final approval given' : 'Claim signed off'),
+      mode == 'reject' ? 'Claim returned to the lecturer' : (paying ? 'Payment recorded' : claim['status'] == 'dean_approved' ? 'Approved for payment' : 'Claim signed off'),
     );
   }
 

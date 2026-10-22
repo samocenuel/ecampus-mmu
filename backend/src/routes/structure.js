@@ -3,6 +3,7 @@ import { Router } from 'express';
 import { requireRole } from '../auth.js';
 import { insert, q, tx, update } from '../db.js';
 import { facultyIdsForDean, placeholders, visibleDepartmentIds, visibleFacultyIds } from '../scope.js';
+import { appointDean, appointHod, leaderCandidate } from '../services/leadership.js';
 import { badRequest, forbidden, notFound, pick, requireFields, toInt } from '../util.js';
 
 const router = Router();
@@ -19,15 +20,6 @@ function getDepartment(uid, id) {
   return d;
 }
 
-/** Validates that `userId` can lead a unit: must belong to this university and hold `role`. */
-function checkLeader(uid, userId, role, label) {
-  if (!userId) return null;
-  const u = q.get('SELECT id, role FROM users WHERE id = ? AND university_id = ? AND active = 1', userId, uid);
-  if (!u) throw badRequest(`Selected ${label} was not found`);
-  if (u.role !== role) throw badRequest(`Only users with the ${label} role can be appointed ${label}`);
-  return u.id;
-}
-
 const facultySelect = `
   SELECT f.*, u.name AS dean_name, u.email AS dean_email,
          (SELECT COUNT(*) FROM departments d WHERE d.faculty_id = f.id) AS department_count
@@ -39,12 +31,15 @@ router.get('/faculties', (req, res) => {
   res.json(q.all(`${facultySelect} WHERE f.university_id = ? AND f.id IN (${placeholders(facs)}) ORDER BY f.name`, req.uid, ...facs));
 });
 
+const handedOver = (previousId) => (previousId ? q.get('SELECT id, name FROM users WHERE id = ?', previousId) : null);
+
+/** The administrator appoints Deans; appointing a new one hands the faculty over. */
 router.post('/faculties', requireRole('admin'), (req, res) => {
   requireFields(req.body, ['name']);
-  const deanId = checkLeader(req.uid, toInt(req.body.dean_id), 'dean', 'Dean');
+  const dean = leaderCandidate(req.uid, toInt(req.body.dean_id), 'Dean');
   const id = tx(() => {
-    const fid = insert('faculties', { university_id: req.uid, name: req.body.name.trim(), code: req.body.code || null, dean_id: deanId });
-    if (deanId) q.run('UPDATE users SET faculty_id = ? WHERE id = ?', fid, deanId);
+    const fid = insert('faculties', { university_id: req.uid, name: req.body.name.trim(), code: req.body.code || null });
+    if (dean) appointDean(getFaculty(req.uid, fid), dean.id);
     return fid;
   });
   res.status(201).json(q.get(`${facultySelect} WHERE f.id = ?`, id));
@@ -53,12 +48,12 @@ router.post('/faculties', requireRole('admin'), (req, res) => {
 router.put('/faculties/:id', requireRole('admin'), (req, res) => {
   const f = getFaculty(req.uid, req.params.id);
   const data = pick(req.body, ['name', 'code']);
-  if (req.body.dean_id !== undefined) data.dean_id = checkLeader(req.uid, toInt(req.body.dean_id), 'dean', 'Dean');
-  tx(() => {
+  const dean = req.body.dean_id !== undefined ? leaderCandidate(req.uid, toInt(req.body.dean_id), 'Dean') : undefined;
+  const previous = tx(() => {
     update('faculties', f.id, data);
-    if (data.dean_id) q.run('UPDATE users SET faculty_id = ? WHERE id = ?', f.id, data.dean_id);
+    return dean !== undefined ? appointDean(getFaculty(req.uid, f.id), dean?.id ?? null) : null;
   });
-  res.json(q.get(`${facultySelect} WHERE f.id = ?`, f.id));
+  res.json({ ...q.get(`${facultySelect} WHERE f.id = ?`, f.id), handed_over_from: handedOver(previous) });
 });
 
 router.delete('/faculties/:id', requireRole('admin'), (req, res) => {
@@ -101,16 +96,11 @@ router.post('/departments', requireRole('admin', 'dean'), (req, res) => {
   requireFields(req.body, ['name', 'faculty_id']);
   const faculty = getFaculty(req.uid, req.body.faculty_id);
   assertManageFaculty(req.user, faculty.id);
-  const hodId = checkLeader(req.uid, toInt(req.body.hod_id), 'hod', 'HoD');
+  const hod = leaderCandidate(req.uid, toInt(req.body.hod_id), 'Head of Department');
+  if (hod) assertCanLead(req.user, hod, faculty.id);
   const id = tx(() => {
-    const did = insert('departments', {
-      university_id: req.uid,
-      faculty_id: faculty.id,
-      name: req.body.name.trim(),
-      code: req.body.code || null,
-      hod_id: hodId,
-    });
-    if (hodId) q.run('UPDATE users SET department_id = ?, faculty_id = ? WHERE id = ?', did, faculty.id, hodId);
+    const did = insert('departments', { university_id: req.uid, faculty_id: faculty.id, name: req.body.name.trim(), code: req.body.code || null });
+    if (hod) appointHod(getDepartment(req.uid, did), hod.id);
     return did;
   });
   res.status(201).json(q.get(`${departmentSelect} WHERE d.id = ?`, id));
@@ -125,13 +115,21 @@ router.put('/departments/:id', requireRole('admin', 'dean'), (req, res) => {
     assertManageFaculty(req.user, target.id);
     data.faculty_id = target.id;
   }
-  if (req.body.hod_id !== undefined) data.hod_id = checkLeader(req.uid, toInt(req.body.hod_id), 'hod', 'HoD');
-  tx(() => {
+  const hod = req.body.hod_id !== undefined ? leaderCandidate(req.uid, toInt(req.body.hod_id), 'Head of Department') : undefined;
+  if (hod) assertCanLead(req.user, hod, data.faculty_id || d.faculty_id);
+  const previous = tx(() => {
     update('departments', d.id, data);
-    if (data.hod_id) q.run('UPDATE users SET department_id = ?, faculty_id = ? WHERE id = ?', d.id, data.faculty_id || d.faculty_id, data.hod_id);
+    return hod !== undefined ? appointHod(getDepartment(req.uid, d.id), hod?.id ?? null) : null;
   });
-  res.json(q.get(`${departmentSelect} WHERE d.id = ?`, d.id));
+  res.json({ ...q.get(`${departmentSelect} WHERE d.id = ?`, d.id), handed_over_from: handedOver(previous) });
 });
+
+/** A Dean appoints Heads of Department from the staff of their own faculty. */
+function assertCanLead(actor, candidate, facultyId) {
+  if (actor.role === 'admin') return;
+  const candidateFaculty = candidate.department_id ? q.get('SELECT faculty_id FROM departments WHERE id = ?', candidate.department_id)?.faculty_id : candidate.faculty_id;
+  if (candidateFaculty && candidateFaculty !== Number(facultyId)) throw forbidden(`${candidate.name} works in another faculty`);
+}
 
 router.delete('/departments/:id', requireRole('admin', 'dean'), (req, res) => {
   const d = getDepartment(req.uid, req.params.id);

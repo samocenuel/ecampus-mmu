@@ -9,6 +9,7 @@ import { pathToFileURL } from 'node:url';
 import { hashPassword } from './auth.js';
 import { db, insert, q, tx } from './db.js';
 import crypto from 'node:crypto';
+import { ensureVersion } from './services/curriculum.js';
 import { generateExams } from './services/exams.js';
 import { occurrences } from './services/occurrences.js';
 import { suggestSlots } from './services/ops.js';
@@ -29,7 +30,7 @@ function wipe() {
     'calendar_events', 'session_changes', 'attendance_corrections', 'checkin_flags', 'checkins', 'checkin_sessions', 'student_devices',
     'pay_claim_events', 'pay_claim_lines', 'pay_claims', 'pay_votes', 'pay_rates',
     'notifications', 'notification_prefs', 'attendance_records', 'attendance_registers', 'timetable_sessions',
-    'allocation_classes', 'allocations', 'program_course_units', 'course_units', 'classes', 'programs',
+    'allocation_classes', 'allocations', 'program_course_units', 'course_units', 'classes', 'curriculum_versions', 'programs',
     'departments', 'faculties', 'rooms', 'academic_terms', 'users', 'universities',
   ]) db.exec(`DELETE FROM ${t}`);
   db.exec("DELETE FROM sqlite_sequence");
@@ -78,6 +79,8 @@ export function seedDemo({ quiet = false, ownerPassword = DEMO_PASSWORD } = {}) 
       university_id: uni, name: `${academicYear} Semester 2`, academic_year: academicYear, semester: 2,
       start_date: addDays(start, 22 * 7), end_date: addDays(start, 39 * 7 - 3), is_current: 0,
     });
+    // Classes are in this academic year; they move up when the next year's Semester 1 starts.
+    q.run('UPDATE universities SET progressed_year = ? WHERE id = ?', academicYear, uni);
 
     // --- Faculties & departments with Deans and HoDs ---
     const structure = [
@@ -134,14 +137,16 @@ export function seedDemo({ quiet = false, ownerPassword = DEMO_PASSWORD } = {}) 
       BBA: ['Bachelor of Business Administration', 'BA'],
     };
     const programId = {};
+    const versionId = {};
     const classId = {};
     let studentNo = 0;
     for (const [code, [name, d]] of Object.entries(programs)) {
       programId[code] = insert('programs', { university_id: uni, department_id: dept[d], name, code, level: 'Bachelor', duration_years: 3 });
+      versionId[code] = ensureVersion({ id: programId[code], university_id: uni }).id;
       for (const y of [1, 2]) {
         const cid = insert('classes', {
           university_id: uni, program_id: programId[code], name: `${code} Year ${y}`, year_of_study: y,
-          academic_year: academicYear, expected_size: y === 1 ? 60 : 45,
+          academic_year: academicYear, expected_size: y === 1 ? 60 : 45, curriculum_version_id: versionId[code],
         });
         classId[`${code}${y}`] = cid;
         for (let i = 1; i <= 12; i++) {
@@ -175,7 +180,7 @@ export function seedDemo({ quiet = false, ownerPassword = DEMO_PASSWORD } = {}) 
         preferred_room_type: opts.room || null, description: opts.desc || null,
       });
       for (const [p, y, s] of opts.programs || []) {
-        q.run('INSERT INTO program_course_units (program_id, course_unit_id, year_of_study, semester) VALUES (?, ?, ?, ?)', programId[p], cuId[code], y, s);
+        q.run('INSERT INTO program_course_units (program_id, version_id, course_unit_id, year_of_study, semester) VALUES (?, ?, ?, ?, ?)', programId[p], versionId[p], cuId[code], y, s);
       }
     };
     unit('CCS1101', 'Communication Skills', 2, { cc: true, dept: 'BA', desc: 'Academic writing, presentation and interpersonal communication.', programs: [['BSCS', 1, 1], ['BIT', 1, 1], ['BCOM', 1, 1], ['BBA', 1, 1]] });

@@ -30,7 +30,7 @@ const UNIQUE_MESSAGES = {
   'users.email': 'A user with that email address already exists',
   'programs.university_id, programs.code': 'A programme with that code already exists',
   'course_units.university_id, course_units.code': 'A course unit with that code already exists',
-  'program_course_units.program_id, program_course_units.course_unit_id': 'That course unit is already part of this programme',
+  'program_course_units.version_id, program_course_units.course_unit_id': 'That course unit is already part of this curriculum version',
   'universities.slug': 'A university with that short name already exists',
   'attendance_registers.session_id, attendance_registers.class_id, attendance_registers.lecture_date':
     'A register already exists for that lecture',

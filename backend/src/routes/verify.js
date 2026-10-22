@@ -40,7 +40,9 @@ router.get('/:code', (req, res) => {
       amount: claim.total,
       currency: claim.currency,
       status: claim.status,
-      status_label: LABELS[claim.status] || claim.status,
+      // Approval status: HR's final approval reads "Approved for payment"; a recorded payment is shown separately.
+      status_label: ['hr_verified', 'paid'].includes(claim.status) ? 'Approved for payment' : LABELS[claim.status] || claim.status,
+      paid: claim.status === 'paid',
       cleared: ['hr_verified', 'paid'].includes(claim.status),
       paid_at: claim.paid_at,
       vote: claim.vote_code ? `${claim.vote_code} - ${claim.vote_name}` : null,

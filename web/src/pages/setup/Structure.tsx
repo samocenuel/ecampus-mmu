@@ -1,9 +1,11 @@
 // Faculties (led by Deans) and Departments (led by Heads of Department).
 import { Link } from 'react-router-dom';
 import { useAuth } from '../../auth';
+import { useFeedback } from '../../components/feedback';
 import { ResourcePage } from '../../components/ResourcePage';
 import { Badge, plural } from '../../components/ui';
 import { useFetch } from '../../hooks';
+import { ROLE_LABELS, Role } from '../../types';
 
 const leader = (name?: string | null, email?: string | null) =>
   name ? (
@@ -17,7 +19,8 @@ const leader = (name?: string | null, email?: string | null) =>
 
 export function Faculties() {
   const { hasRole } = useAuth();
-  const { data: deans } = useFetch<any[]>('/api/users?role=dean&active=1');
+  const { data: deans } = useFetch<any[]>('/api/users?roles=lecturer,hod,dean&active=1');
+  const { toast } = useFeedback();
   const isAdmin = hasRole('admin');
   return (
     <ResourcePage
@@ -43,9 +46,10 @@ export function Faculties() {
       fields={[
         { name: 'name', label: 'Faculty name', required: true, span: 2, placeholder: 'e.g. Faculty of Science and Technology' },
         { name: 'code', label: 'Code', placeholder: 'e.g. FST' },
-        { name: 'dean_id', label: 'Dean', type: 'select', placeholder: 'Not appointed', options: (deans || []).map((d) => ({ value: d.id, label: `${d.title ? `${d.title} ` : ''}${d.name}` })) },
+        { name: 'dean_id', label: 'Dean', type: 'select', placeholder: 'Not appointed', options: (deans || []).map((x: any) => ({ value: x.id, label: `${x.title ? `${x.title} ` : ''}${x.name} (${ROLE_LABELS[x.role as Role] || x.role}${x.department_name ? `, ${x.department_name}` : ''})` })), help: 'Appointing someone new hands the faculty over: the previous Dean becomes a lecturer.' },
       ]}
       fromRow={(f: any) => ({ name: f.name, code: f.code || '', dean_id: f.dean_id || '' })}
+      onSaved={(r: any) => r?.handed_over_from && toast(`${r.dean_name} is now Dean; ${r.handed_over_from.name} has a lecturer account`)}
     />
   );
 }
@@ -54,7 +58,8 @@ export function Departments() {
   const { hasRole, user } = useAuth();
   const isDean = user?.role === 'dean';
   const { data: faculties } = useFetch<any[]>('/api/faculties');
-  const { data: hods } = useFetch<any[]>('/api/users?role=hod&active=1');
+  const { data: hods } = useFetch<any[]>('/api/users?roles=lecturer,hod&active=1');
+  const { toast } = useFeedback();
   const canManage = hasRole('admin', 'dean');
   return (
     <ResourcePage
@@ -82,9 +87,10 @@ export function Departments() {
         { name: 'faculty_id', label: 'Faculty', type: 'select', required: true, span: 2, options: (faculties || []).map((f) => ({ value: f.id, label: f.name })) },
         { name: 'name', label: 'Department name', required: true, span: 2 },
         { name: 'code', label: 'Code' },
-        { name: 'hod_id', label: 'Head of Department', type: 'select', placeholder: 'Not appointed', options: (hods || []).map((h) => ({ value: h.id, label: `${h.title ? `${h.title} ` : ''}${h.name}` })) },
+        { name: 'hod_id', label: 'Head of Department', type: 'select', placeholder: 'Not appointed', options: (hods || []).map((x: any) => ({ value: x.id, label: `${x.title ? `${x.title} ` : ''}${x.name} (${ROLE_LABELS[x.role as Role] || x.role}${x.department_name ? `, ${x.department_name}` : ''})` })), help: 'Appointing someone new hands the department over: the previous HoD becomes a lecturer.' },
       ]}
       fromRow={(d: any) => ({ faculty_id: d.faculty_id, name: d.name, code: d.code || '', hod_id: d.hod_id || '' })}
+      onSaved={(r: any) => r?.handed_over_from && toast(`${r.hod_name} is now Head of Department; ${r.handed_over_from.name} has a lecturer account`)}
     />
   );
 }

@@ -160,7 +160,7 @@ function UnitTable({ units, onAllocate, locked }: { units: any[]; onAllocate: (u
           render: (u) => (
             <div className="chips">
               {u.classes.map((c: any) => (
-                <span key={c.class_id} className={`chip ${c.allocation_id ? 'chip-done' : 'chip-pending'}`} title={c.lecturer_name ? `Lecturer: ${c.lecturer_name}` : 'Not allocated'}>
+                <span key={c.class_id} className={`chip ${c.draft ? 'chip-draft' : c.allocation_id ? 'chip-done' : 'chip-pending'}`} title={c.lecturer_name ? `${c.draft ? 'Draft (copied from last year)' : 'Lecturer'}: ${c.lecturer_name}` : 'Not allocated'}>
                   {c.class_name}
                   {c.lecturer_name && <small> · {c.lecturer_name}</small>}
                 </span>
@@ -212,6 +212,27 @@ export default function Allocation() {
   const s = reqs?.summary;
   const ccDone = s ? s.cross_cutting_allocated >= s.cross_cutting_pairs : true;
 
+  const drafts = (allocations || []).filter((a) => a.status === 'draft');
+  const confirmOne = async (a: any) => {
+    try {
+      await api(`/api/allocations/${a.id}/confirm`, { method: 'POST' });
+      toast(`${a.code} confirmed for ${a.lecturer_name}`);
+      reload();
+    } catch (err) {
+      fail(err);
+    }
+  };
+  const confirmAll = async () => {
+    if (!(await confirm({ title: `Confirm ${drafts.length} draft allocations?`, message: 'They were copied from last year with the same lecturers. Confirmed allocations are placed when the timetable is generated, and lecturers are told.', confirmLabel: 'Confirm all' }))) return;
+    try {
+      const r = await api<any>('/api/allocations/confirm-drafts', { method: 'POST', body: { term_id: term } });
+      toast(`${r.confirmed} allocations confirmed`);
+      reload();
+    } catch (err) {
+      fail(err);
+    }
+  };
+
   const remove = async (a: any) => {
     const ok = await confirm({ title: 'Remove allocation?', message: `${a.code} for ${a.classes.map((c: any) => c.name).join(', ')} - its timetable sessions are removed too.`, confirmLabel: 'Remove', tone: 'danger' });
     if (!ok) return;
@@ -237,6 +258,11 @@ export default function Allocation() {
       {loading && !reqs && <Spinner />}
       {reqs && (
         <div className="stack">
+          {drafts.length > 0 && (
+            <Alert tone="info" title={`${drafts.length} draft allocations copied from last year`} action={<Button size="sm" onClick={confirmAll}>Confirm all</Button>}>
+              The same course units with last year's lecturers, matched to this year's classes. Change any that need a different lecturer (saving confirms it), then confirm the rest.
+            </Alert>
+          )}
           {reqs.cross_cutting_units_defined === 0 && (
             <Alert tone="warning" title="No cross-cutting course units have been created" action={<Link to="/setup/course-units" className="btn btn-sm btn-primary">Create course units</Link>}>
               Cross-cutting units (e.g. Communication Skills) are shared by several programmes and must be created and allocated before programme-specific units.
@@ -289,7 +315,7 @@ export default function Allocation() {
               columns={[
                 { key: 'code', header: 'Unit', render: (a) => <><strong>{a.code}</strong> {a.is_cross_cutting ? <span className="cc-tag">CC</span> : null}<div className="muted small">{a.course_name}</div></> },
                 { key: 'classes', header: 'Classes', render: (a) => a.classes.map((c: any) => c.name).join(', ') },
-                { key: 'lecturer_name', header: 'Lecturer', render: (a) => `${a.lecturer_title ? `${a.lecturer_title} ` : ''}${a.lecturer_name}` },
+                { key: 'lecturer_name', header: 'Lecturer', render: (a) => <>{`${a.lecturer_title ? `${a.lecturer_title} ` : ''}${a.lecturer_name}`} {a.status === 'draft' && <Badge tone="info">Draft</Badge>}</> },
                 {
                   key: 'hours_per_week',
                   header: 'Scheduled',
@@ -305,6 +331,11 @@ export default function Allocation() {
                   align: 'right',
                   render: (a) => (
                     <div className="row-actions">
+                      {a.status === 'draft' && (
+                        <IconButton label="Confirm" onClick={() => confirmOne(a)}>
+                          <CheckCircle2 size={16} />
+                        </IconButton>
+                      )}
                       <IconButton label="Edit" onClick={() => setEditing(a)}>
                         <Pencil size={16} />
                       </IconButton>

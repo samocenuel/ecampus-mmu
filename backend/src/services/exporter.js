@@ -903,13 +903,13 @@ export function requisitionPdf(university, claim, lines, { lecturer, vote, voteB
         doc.save();
         doc.rotate(-32, { origin: [doc.page.width / 2, doc.page.height / 2] });
         doc.font('Helvetica-Bold').fontSize(64).fillColor('#D92D20').fillOpacity(0.08);
-        doc.text('NOT YET CLEARED', 0, doc.page.height / 2 - 40, { width: doc.page.width, align: 'center' });
+        doc.text('NOT YET APPROVED', 0, doc.page.height / 2 - 40, { width: doc.page.width, align: 'center' });
         doc.restore();
         doc.fillOpacity(1);
       }
       doc.font('Helvetica-Bold').fontSize(14).fillColor('#101828').text('Funds Requisition Form', left, y, { width, align: 'center', underline: true });
       y = doc.y + 4;
-      doc.font('Helvetica').fontSize(8.5).fillColor(cleared ? '#067647' : '#B42318').text(cleared ? `Cleared for payment · claim #${claim.id}` : `Not yet cleared: ${claim.status_label} · claim #${claim.id}`, left, y, { width, align: 'center' });
+      doc.font('Helvetica').fontSize(8.5).fillColor(cleared ? '#067647' : '#B42318').text(cleared ? `Approved for payment · requisition #${claim.id}` : `Not yet approved for payment: ${claim.status_label} · requisition #${claim.id}`, left, y, { width, align: 'center' });
       y = doc.y + 12;
 
       // Claimant and vote, as label / value pairs on a ruled line.
@@ -1021,7 +1021,7 @@ export function requisitionPdf(university, claim, lines, { lecturer, vote, voteB
       y = doc.y + 8;
       signBlock('Verified by Head of Department', signers.hod);
       signBlock('Signed off by Vote Controller (Dean)', signers.dean, vote ? `Charged to vote ${vote.code} - ${vote.name}.` : null);
-      signBlock('Final approval by HR Officer', signers.hr, cleared ? 'Cleared for payment and printed for submission.' : null);
+      signBlock('Final approval by HR Officer', signers.hr, cleared ? 'Approved for payment and printed for submission.' : null);
 
       // Finance completes these on paper after HR submits the form.
       const blank = (title, text) => {

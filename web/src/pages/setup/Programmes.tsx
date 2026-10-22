@@ -1,11 +1,11 @@
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, Plus, Trash2 } from 'lucide-react';
+import { ArrowLeft, GitBranch, Plus, Trash2 } from 'lucide-react';
 import { api } from '../../api';
 import { useAuth } from '../../auth';
 import { useFeedback } from '../../components/feedback';
 import { ResourcePage } from '../../components/ResourcePage';
-import { Badge, Button, Card, EmptyState, ErrorNote, Field, IconButton, Modal, PageHeader, Select, Spinner } from '../../components/ui';
+import { Badge, Button, Card, EmptyState, ErrorNote, Field, IconButton, Input, Modal, PageHeader, Select, Spinner } from '../../components/ui';
 import { useFetch } from '../../hooks';
 
 export const LEVELS = ['Short course', 'Certificate', 'Diploma', 'Bachelor', 'Postgraduate Diploma', 'Masters', 'PhD'];
@@ -51,15 +51,18 @@ export function ProgrammeDetail() {
   const { id } = useParams();
   const { hasRole } = useAuth();
   const { toast, fail, confirm } = useFeedback();
-  const { data: p, loading, error, reload } = useFetch<any>(`/api/programs/${id}`);
+  const [versionId, setVersionId] = useState<string>('');
+  const { data: p, loading, error, reload } = useFetch<any>(`/api/programs/${id}${versionId ? `?version_id=${versionId}` : ''}`);
   const { data: units } = useFetch<any[]>('/api/course-units');
   const [adding, setAdding] = useState(false);
+  const [newVersion, setNewVersion] = useState<any>(null);
+  const year = new Date().getFullYear();
   const [form, setForm] = useState({ course_unit_id: '', year_of_study: '1', semester: '1' });
   const canManage = hasRole('admin', 'dean', 'hod');
 
   const add = async () => {
     try {
-      await api(`/api/programs/${id}/course-units`, { method: 'POST', body: form });
+      await api(`/api/programs/${id}/course-units`, { method: 'POST', body: { ...form, version_id: p.version?.id } });
       toast('Course unit added to the curriculum');
       setAdding(false);
       reload();
@@ -68,9 +71,21 @@ export function ProgrammeDetail() {
     }
   };
   const remove = async (cu: any) => {
-    if (!(await confirm({ title: 'Remove from programme?', message: `${cu.code} will no longer be part of ${p.code}. The course unit itself is kept.`, confirmLabel: 'Remove', tone: 'danger' }))) return;
+    if (!(await confirm({ title: `Remove from ${p.version?.name || 'the curriculum'}?`, message: `${cu.code} will no longer be part of ${p.code} ${p.version?.name || ''}. Other versions and the course unit itself are kept.`, confirmLabel: 'Remove', tone: 'danger' }))) return;
     try {
-      await api(`/api/programs/${id}/course-units/${cu.id}`, { method: 'DELETE' });
+      await api(`/api/programs/${id}/course-units/${cu.id}${p.version ? `?version_id=${p.version.id}` : ''}`, { method: 'DELETE' });
+      reload();
+    } catch (err) {
+      fail(err);
+    }
+  };
+
+  const createVersion = async () => {
+    try {
+      const v = await api<any>(`/api/programs/${id}/versions`, { method: 'POST', body: newVersion });
+      toast(`${v.name} created as a copy of the current curriculum. New intakes will follow it.`);
+      setNewVersion(null);
+      setVersionId(String(v.id));
       reload();
     } catch (err) {
       fail(err);
@@ -82,7 +97,10 @@ export function ProgrammeDetail() {
   if (!p) return null;
   const linked = new Set(p.course_units.map((c: any) => c.id));
   // Programme-specific units already used elsewhere can't be added; cross-cutting units can.
-  const available = (units || []).filter((u) => !linked.has(u.id) && (u.is_cross_cutting || u.program_count === 0));
+  const available = (units || []).filter((u) => !linked.has(u.id) && (u.is_cross_cutting || u.program_count === 0 || (u.programs || []).some((x: any) => x.id === p.id)));
+  const editable = canManage && p.version && p.version.status !== 'retired';
+  const VERSION_TONE: Record<string, 'success' | 'warning' | 'neutral'> = { active: 'success', phasing_out: 'warning', retired: 'neutral' };
+  const VERSION_LABEL: Record<string, string> = { active: 'Current', phasing_out: 'Phasing out', retired: 'Retired' };
   const groups: Record<string, any[]> = {};
   for (const cu of p.course_units) (groups[`Year ${cu.year_of_study} · Semester ${cu.semester}`] ||= []).push(cu);
 
@@ -97,6 +115,11 @@ export function ProgrammeDetail() {
               <ArrowLeft size={16} /> <span>Programmes</span>
             </Link>
             {canManage && (
+              <Button variant="secondary" icon={<GitBranch size={16} />} onClick={() => setNewVersion({ name: `${year + 1} curriculum`, starts_academic_year: `${year + 1}/${year + 2}` })}>
+                New curriculum version
+              </Button>
+            )}
+            {editable && (
               <Button icon={<Plus size={16} />} onClick={() => setAdding(true)}>
                 Add course unit
               </Button>
@@ -104,6 +127,19 @@ export function ProgrammeDetail() {
           </>
         }
       />
+      {p.versions?.length > 0 && (
+        <Card title="Curriculum versions" padded={false}>
+          <div className="pad-x muted small">New intakes follow the current version. Classes keep the version they started on until they finish, then it retires.</div>
+          <div className="version-list">
+            {p.versions.map((v: any) => (
+              <button key={v.id} type="button" className={`version-chip${p.version?.id === v.id ? ' selected' : ''}`} onClick={() => setVersionId(String(v.id))}>
+                <strong>{v.name}</strong> <Badge tone={VERSION_TONE[v.status]}>{VERSION_LABEL[v.status]}</Badge>
+                <span className="muted small">{v.starts_academic_year ? `From ${v.starts_academic_year} · ` : ''}{v.unit_count} units · {v.class_count} classes</span>
+              </button>
+            ))}
+          </div>
+        </Card>
+      )}
       <div className="grid-2 align-start">
         <div className="stack">
           {Object.keys(groups).length === 0 && (
@@ -127,7 +163,7 @@ export function ProgrammeDetail() {
                         </div>
                       </td>
                       <td style={{ width: 50 }}>
-                        {canManage && (
+                        {editable && (
                           <IconButton label="Remove" className="danger" onClick={() => remove(cu)}>
                             <Trash2 size={16} />
                           </IconButton>
@@ -145,7 +181,8 @@ export function ProgrammeDetail() {
           <ul className="name-list">
             {p.classes.map((c: any) => (
               <li key={c.id}>
-                <strong>{c.name}</strong> <span className="muted">Year {c.year_of_study} · {c.academic_year}</span>
+                <strong>{c.name}</strong> {c.status === 'completed' && <Badge>Completed</Badge>}{' '}
+                <span className="muted">Year {c.year_of_study} · {c.academic_year}{c.curriculum_version_name ? ` · ${c.curriculum_version_name}` : ''}</span>
               </li>
             ))}
           </ul>
@@ -154,7 +191,7 @@ export function ProgrammeDetail() {
       <Modal
         open={adding}
         onClose={() => setAdding(false)}
-        title={`Add a course unit to ${p.code}`}
+        title={`Add a course unit to ${p.code}${p.version ? ` (${p.version.name})` : ''}`}
         footer={
           <>
             <Button variant="secondary" onClick={() => setAdding(false)}>
@@ -183,6 +220,24 @@ export function ProgrammeDetail() {
           </Field>
         </div>
       </Modal>
+      {newVersion && (
+        <Modal
+          open
+          onClose={() => setNewVersion(null)}
+          title={`New curriculum version for ${p.code}`}
+          footer={<><Button variant="secondary" onClick={() => setNewVersion(null)}>Cancel</Button><Button onClick={createVersion} disabled={!newVersion.name?.trim()}>Create</Button></>}
+        >
+          <p className="muted m0">The new version starts as a copy of {p.versions?.find((v: any) => v.status !== 'retired')?.name || 'the current curriculum'}; then add, move or remove units. Classes already running keep their version, so they are phased out as they finish.</p>
+          <div className="form-grid">
+            <Field label="Name *">
+              <Input value={newVersion.name} onChange={(e) => setNewVersion({ ...newVersion, name: e.target.value })} />
+            </Field>
+            <Field label="First intake (academic year)">
+              <Input value={newVersion.starts_academic_year} placeholder="2027/2028" onChange={(e) => setNewVersion({ ...newVersion, starts_academic_year: e.target.value })} />
+            </Field>
+          </div>
+        </Modal>
+      )}
     </>
   );
 }

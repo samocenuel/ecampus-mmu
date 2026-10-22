@@ -203,7 +203,8 @@ export function generateTimetable(universityId, termId, { clearExisting = false 
 
     const rooms = q.all('SELECT * FROM rooms WHERE university_id = ? AND active = 1 ORDER BY capacity, name', universityId);
     const allocations = q
-      .all('SELECT id FROM allocations WHERE university_id = ? AND term_id = ?', universityId, termId)
+      // Draft allocations (copied from last year) are placed once the HoD confirms them.
+      .all("SELECT id FROM allocations WHERE university_id = ? AND term_id = ? AND status = 'confirmed'", universityId, termId)
       .map((r) => allocationContext(r.id, universityId));
     allocations.sort(
       (a, b) =>
