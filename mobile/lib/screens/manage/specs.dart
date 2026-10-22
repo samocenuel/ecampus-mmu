@@ -57,7 +57,7 @@ final departmentsSpec = RSpec(
   fromRow: (r) => {'faculty_id': r['faculty_id'], 'name': r['name'], 'code': r['code'], 'hod_id': r['hod_id']},
 );
 
-const _levels = ['Certificate', 'Diploma', 'Bachelor', 'Postgraduate Diploma', 'Masters', 'PhD'];
+const _levels = ['Short course', 'Certificate', 'Diploma', 'Bachelor', 'Postgraduate Diploma', 'Masters', 'PhD'];
 
 final programmesSpec = RSpec(
   title: 'Programmes',
@@ -285,11 +285,12 @@ RSpec usersSpec(AppState app, String group) {
       FSpec('faculty_id', 'Faculty', type: FType.select, ref: 'faculties', showIf: (f) => f['role'] == 'dean'),
       FSpec('department_id', 'Department', type: FType.select, ref: 'departments', showIf: (f) => f['role'] == 'hod' || f['role'] == 'lecturer'),
       FSpec('class_id', 'Class', type: FType.select, ref: 'classes', required: true, showIf: (f) => f['role'] == 'student'),
-      const FSpec('password', 'Password (blank = generate temporary)', type: FType.password),
+      // Editing never changes the password: use "Reset password" on the account instead.
+      FSpec('password', 'Password (blank = generate temporary)', type: FType.password, showIf: (f) => f['id'] == null),
     ],
-    fromRow: (r) => {for (final k in ['role', 'employment_type', 'title', 'name', 'email', 'phone', 'identifier', 'faculty_id', 'department_id', 'class_id']) k: r[k]},
+    fromRow: (r) => {'id': r['id'], for (final k in ['role', 'employment_type', 'title', 'name', 'email', 'phone', 'identifier', 'faculty_id', 'department_id', 'class_id']) k: r[k]},
     toPayload: (f, creating) {
-      final body = Map<String, dynamic>.from(f);
+      final body = Map<String, dynamic>.from(f)..remove('id');
       for (final k in ['faculty_id', 'department_id', 'class_id']) {
         if (body[k] == '') body[k] = null;
       }
@@ -297,27 +298,53 @@ RSpec usersSpec(AppState app, String group) {
       if (!const ['lecturer', 'hod', 'dean'].contains(body['role'])) body.remove('employment_type');
       return body;
     },
+    actions: (context, r, reload) => [
+      if (r['id'] != app.user?['id'] && allowed.contains(r['role']))
+        IconButton(
+          tooltip: 'Reset password',
+          icon: const Icon(Icons.key_outlined),
+          onPressed: () async {
+            final ok = await confirmDialog(
+              context,
+              title: 'Reset ${r['name']}\'s password?',
+              message: 'Their current password stops working. You get a temporary password to give them, and they choose a new one when they sign in.',
+              confirmLabel: 'Reset password',
+            );
+            if (!ok || !context.mounted) return;
+            try {
+              final res = await app.api.post('/api/users/${r['id']}/reset-password') as Map<String, dynamic>;
+              if (context.mounted) await _showTempPassword(context, '${res['name']}', '${res['temporary_password']}', reset: true);
+            } catch (e) {
+              if (context.mounted) showError(context, e);
+            }
+          },
+        ),
+    ],
     onCreated: (context, result) async {
       final temp = result['temporary_password'];
       if (temp == null) return;
-      await showDialog<void>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text('Temporary password'),
-          content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text("Share this with ${result['name']} securely. It's shown only once."),
-            const SizedBox(height: 12),
-            SelectableText('$temp', style: const TextStyle(fontSize: 20, fontFamily: 'monospace')),
-          ]),
-          actions: [
-            TextButton(onPressed: () => Clipboard.setData(ClipboardData(text: '$temp')), child: const Text('Copy')),
-            FilledButton(onPressed: () => Navigator.pop(ctx), child: const Text('Done')),
-          ],
-        ),
-      );
+      await _showTempPassword(context, '${result['name']}', '$temp');
     },
   );
 }
+
+Future<void> _showTempPassword(BuildContext context, String name, String temp, {bool reset = false}) => showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(reset ? 'Password reset' : 'Temporary password'),
+        content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(reset
+              ? '$name can sign in with this temporary password and will choose a new one straight away. Share it securely: it is shown only once.'
+              : "Share this with $name securely. It's shown only once, and they choose their own password at first sign-in."),
+          const SizedBox(height: 12),
+          SelectableText(temp, style: const TextStyle(fontSize: 20, fontFamily: 'monospace')),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Clipboard.setData(ClipboardData(text: temp)), child: const Text('Copy')),
+          FilledButton(onPressed: () => Navigator.pop(ctx), child: const Text('Done')),
+        ],
+      ),
+    );
 
 /// Part-time pay rates: the Dean sets a teaching rate per hour and task rates (marking, supervision...).
 final payRatesSpec = RSpec(
@@ -327,7 +354,7 @@ final payRatesSpec = RSpec(
   intro: 'Rates used for part-time claims. Teaching is paid per contact hour; tasks per script, student, visit...',
   titleOf: (r) => '${r['name']} · ${NumberFormat('#,##0.##').format(r['amount'])} per ${r['unit']}',
   subtitleOf: (r) => '${r['faculty_name']}${r['description'] != null ? ' · ${r['description']}' : ''}',
-  badgeOf: (r) => r['kind'] == 'teaching' ? 'TEACHING' : null,
+  badgeOf: (r) => [if (r['kind'] == 'teaching') 'TEACHING', if (r['program_level'] != null) '${r['program_level']}'.toUpperCase()].join(' · ').ifEmpty,
   canCreate: _adminOrDean,
   canEdit: _adminOrDean,
   canDelete: _adminOrDean,
@@ -336,9 +363,14 @@ final payRatesSpec = RSpec(
     const FSpec('faculty_id', 'Faculty', type: FType.select, ref: 'faculties', required: true),
     FSpec('kind', 'Type', type: FType.select, defaultValue: 'task', options: const [('task', 'Task (marking, supervision...)'), ('teaching', 'Teaching per hour')], showIf: (f) => f['id'] == null),
     const FSpec('name', 'Name', required: true),
+    FSpec('program_level', 'Programme level (blank = all levels)', type: FType.select, options: [('', 'All programme levels'), for (final l in _levels) (l, l)], defaultValue: ''),
     FSpec('unit', 'Paid per', type: FType.select, defaultValue: 'script', options: const [('hour', 'hour'), ('script', 'script'), ('student', 'student'), ('visit', 'visit'), ('day', 'day'), ('item', 'item')], showIf: (f) => f['kind'] != 'teaching'),
     const FSpec('amount', 'Unit price', type: FType.number, required: true),
     const FSpec('description', 'Notes'),
   ],
-  fromRow: (r) => {'id': r['id'], 'faculty_id': r['faculty_id'], 'kind': r['kind'], 'name': r['name'], 'unit': r['unit'], 'amount': r['amount'], 'description': r['description']},
+  fromRow: (r) => {'id': r['id'], 'faculty_id': r['faculty_id'], 'kind': r['kind'], 'name': r['name'], 'program_level': r['program_level'] ?? '', 'unit': r['unit'], 'amount': r['amount'], 'description': r['description']},
 );
+
+extension on String {
+  String? get ifEmpty => isEmpty ? null : this;
+}

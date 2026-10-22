@@ -145,6 +145,18 @@ router.post('/:id/reset-device', requireRole('admin', 'dean', 'hod'), (req, res)
   res.json({ ok: true });
 });
 
+/** A new temporary password for someone who forgot theirs, shown once; they choose their own at next sign-in. */
+router.post('/:id/reset-password', requireRole('admin', 'dean', 'hod'), (req, res) => {
+  const target = q.get('SELECT * FROM users WHERE id = ? AND university_id = ?', req.params.id, req.uid);
+  if (!target) throw notFound('User');
+  if (target.id === req.user.id) throw badRequest('Change your own password from your profile');
+  assertCanManage(req.user, target);
+  if (isProtectedDemoAccount(target)) throw forbidden('The shared demo accounts sign in without a password, so theirs cannot be reset');
+  const password = tempPassword();
+  q.run('UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?', hashPassword(password), target.id);
+  res.json({ ok: true, name: target.name, email: target.email, temporary_password: password });
+});
+
 router.post('/', requireRole('admin', 'dean', 'hod'), (req, res) => {
   requireFields(req.body, ['name', 'email', 'role']);
   const data = resolveOrg(req.uid, normalise(req.body));
@@ -180,6 +192,7 @@ router.put('/:id', requireRole('admin', 'dean', 'hod'), (req, res) => {
     data.active = truthy(req.body.active) ? 1 : 0;
   }
   if (req.body.password) {
+    if (isProtectedDemoAccount(existing)) throw forbidden('The shared demo accounts sign in without a password, so theirs cannot be changed');
     validatePassword(req.body.password);
     data.password_hash = hashPassword(req.body.password);
     data.must_change_password = 1;

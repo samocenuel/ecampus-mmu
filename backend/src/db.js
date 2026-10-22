@@ -490,6 +490,21 @@ CREATE TABLE IF NOT EXISTS pay_budgets (
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE (department_id, term_id)
 );
+
+-- Votes (budget lines) the Dean as Vote Controller charges signed-off part-time claims to.
+CREATE TABLE IF NOT EXISTS pay_votes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  university_id INTEGER NOT NULL REFERENCES universities(id) ON DELETE CASCADE,
+  faculty_id INTEGER NOT NULL REFERENCES faculties(id) ON DELETE CASCADE,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  amount REAL NOT NULL CHECK (amount >= 0),
+  financial_year TEXT,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (faculty_id, code)
+);
 `;
 
 /** Columns added after a table was first created (SQLite only appends columns). */
@@ -505,11 +520,12 @@ const ADDED_COLUMNS = {
     claims_require_checkin: 'INTEGER NOT NULL DEFAULT 0',
   },
   users: { calendar_token: 'TEXT', must_change_password: 'INTEGER NOT NULL DEFAULT 0', photo_path: 'TEXT' },
+  pay_claims: { vote_id: 'INTEGER', verify_code: 'TEXT' },
   programs: { coursework_max: 'REAL NOT NULL DEFAULT 40' },
   attendance_registers: { source: "TEXT NOT NULL DEFAULT 'rep'", self_checkins: 'INTEGER NOT NULL DEFAULT 0' },
   attendance_records: { method: 'TEXT' },
-  pay_rates: { code: 'TEXT' },
-  pay_claim_lines: { exam_id: 'INTEGER REFERENCES exams(id) ON DELETE SET NULL', self_checkins: 'INTEGER' },
+  pay_rates: { code: 'TEXT', program_level: 'TEXT' },
+  pay_claim_lines: { exam_id: 'INTEGER REFERENCES exams(id) ON DELETE SET NULL', self_checkins: 'INTEGER', program_level: 'TEXT' },
 };
 
 function addColumns() {

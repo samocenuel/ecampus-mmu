@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, Check, Download, FileText, Pencil, PiggyBank, Plus, Printer, QrCode, RefreshCw, Trash2, Undo2, Users as UsersIcon, Wallet } from 'lucide-react';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { ArrowLeft, Check, ClipboardCheck, Download, FileText, Landmark, Pencil, PiggyBank, Plus, Printer, QrCode, RefreshCw, Trash2, Undo2, Users as UsersIcon, Wallet } from 'lucide-react';
 import { api, download } from '../api';
 import { useAuth } from '../auth';
 import { useFeedback } from '../components/feedback';
@@ -10,6 +10,7 @@ import {
 } from '../components/ui';
 import { useFetch, usePersistentState } from '../hooks';
 import { useTerms } from './Timetable';
+import { LEVELS } from './setup/Programmes';
 import { ROLE_LABELS, Role } from '../types';
 
 type Tone = 'neutral' | 'primary' | 'success' | 'warning' | 'danger' | 'info';
@@ -19,12 +20,13 @@ const STATUS_TONE: Record<string, Tone> = {
 const ClaimStatus = ({ claim }: { claim: any }) => <Badge tone={STATUS_TONE[claim.status]}>{claim.status_label}</Badge>;
 
 const STEPS = [
-  ['submitted', 'Submitted'],
-  ['hod_approved', 'HoD approved'],
-  ['dean_approved', 'Dean approved'],
-  ['hr_verified', 'HR verified'],
+  ['submitted', 'Submitted by lecturer'],
+  ['hod_approved', 'Verified by HoD'],
+  ['dean_approved', 'Signed off by Dean'],
+  ['hr_verified', 'Final approval (HR)'],
   ['paid', 'Paid'],
 ] as const;
+const CERTIFY = "I certify that the information provided herein above is correct to the best of my knowledge and the claim herein truly conforms to the established expenditure estimates and the finance regulations governing the university.";
 const UNITS = ['hour', 'script', 'student', 'visit', 'day', 'item'];
 
 export function money(amount: number, currency = 'UGX') {
@@ -94,7 +96,11 @@ function NewClaim({ onClose }: { onClose: () => void }) {
         <div className="stat-grid">
           <StatCard label="Lectures to claim" value={preview.lectures.length} />
           <StatCard label="Teaching hours" value={qty(preview.hours)} />
-          <StatCard label="Estimated teaching pay" value={preview.rate ? money(preview.hours * preview.rate.amount) : '-'} hint={preview.rate ? `${money(preview.rate.amount)} per hour` : 'No teaching rate set yet'} />
+          <StatCard
+            label="Estimated teaching pay"
+            value={preview.rates?.length || preview.rate ? money(preview.estimate ?? preview.hours * (preview.rate?.amount || 0)) : '-'}
+            hint={!preview.rate ? 'No teaching rate set yet' : preview.rates?.length > 1 ? 'Rates by programme level' : `${money(preview.rate.amount)} per hour`}
+          />
         </div>
       )}
       {preview?.pending_lectures > 0 && (
@@ -125,6 +131,11 @@ function Rates() {
       options: [{ value: 'task', label: 'Task (marking, supervision...)' }, { value: 'teaching', label: 'Teaching (per contact hour)' }],
     },
     { name: 'name', label: 'Name', required: true, placeholder: 'e.g. Marking, Internship supervision' },
+    {
+      name: 'program_level', label: 'Programme level', type: 'select', placeholder: 'All programme levels',
+      options: LEVELS.map((l) => ({ value: l, label: l })),
+      help: 'Teaching is paid at the rate for the level of the classes taught (e.g. Diploma, Masters), or the all-levels rate when a level has none.',
+    },
     {
       name: 'invigilation', label: 'Use this rate for exam invigilation', type: 'checkbox', span: 2, showIf: (f) => f.kind !== 'teaching',
       help: 'Invigilation duties on the exam timetable are added to claims at this rate, per hour.',
@@ -196,7 +207,7 @@ function Rates() {
             header: 'Item',
             render: (r: any) => (
               <>
-                <strong>{r.name}</strong> {r.kind === 'teaching' && <Badge tone="primary">Teaching</Badge>} {r.code === 'invigilation' && <Badge tone="info">Invigilation</Badge>}
+                <strong>{r.name}</strong> {r.kind === 'teaching' && <Badge tone="primary">Teaching</Badge>} {r.code === 'invigilation' && <Badge tone="info">Invigilation</Badge>} {r.program_level && <Badge>{r.program_level}</Badge>}
                 {r.description && <div className="muted small">{r.description}</div>}
               </>
             ),
@@ -250,6 +261,120 @@ function Rates() {
 }
 
 // ---------------------------------------------------------------- Budgets
+
+/** Votes (budget lines) the Dean as Vote Controller charges signed-off claims to. */
+function Votes() {
+  const { user, university } = useAuth();
+  const { toast, fail, confirm } = useFeedback();
+  const { data: votes, loading, reload } = useFetch<any[]>('/api/claims/votes');
+  const { data: faculties } = useFetch<any[]>('/api/faculties');
+  const [editing, setEditing] = useState<any | 'new' | null>(null);
+  const [form, setForm] = useState<any>({});
+  const [busy, setBusy] = useState(false);
+  const canEdit = user?.role === 'dean' || user?.role === 'admin';
+  const currency = university?.currency || 'UGX';
+  const myFaculties = (faculties || []).filter((f) => user?.role === 'admin' || f.dean_id === user?.id);
+  const open = (v: any | 'new') => {
+    setForm(v === 'new' ? { faculty_id: myFaculties[0]?.id || '', code: '', name: '', amount: '', financial_year: '', active: true } : { ...v, active: Boolean(v.active) });
+    setEditing(v);
+  };
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      const body = { ...form, amount: Number(form.amount) };
+      if (editing === 'new') await api('/api/claims/votes', { method: 'POST', body });
+      else await api(`/api/claims/votes/${editing.id}`, { method: 'PUT', body });
+      toast('Vote saved');
+      setEditing(null);
+      reload();
+    } catch (err) {
+      fail(err);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const remove = async (v: any) => {
+    if (!(await confirm({ title: `Remove vote ${v.code}?`, message: 'A vote that claims were charged to is closed instead, so their requisitions keep it.', confirmLabel: 'Remove', tone: 'danger' }))) return;
+    try {
+      const r = await api<any>(`/api/claims/votes/${v.id}`, { method: 'DELETE' });
+      toast(r.closed ? 'Vote closed' : 'Vote removed');
+      reload();
+    } catch (err) {
+      fail(err);
+    }
+  };
+  return (
+    <Card
+      title={<span className="row gap-sm"><Landmark size={18} /> Votes</span>}
+      padded={false}
+      actions={canEdit && <Button size="sm" icon={<Plus size={14} />} onClick={() => open('new')}>New vote</Button>}
+    >
+      <div className="pad-x muted small">The Dean, as Vote Controller, signs off each claim against one of these votes. The balance shown on the requisition form is the vote amount less claims already signed off.</div>
+      <DataTable
+        rows={votes}
+        loading={loading}
+        empty={canEdit ? 'No votes yet. Add the vote part-time claims are paid from.' : 'No votes yet'}
+        columns={[
+          { key: 'code', header: 'Vote', render: (v: any) => <><strong>{v.code}</strong> {!v.active && <Badge>Closed</Badge>}<div className="muted small">{v.name}{v.financial_year ? ` · ${v.financial_year}` : ''}</div></> },
+          { key: 'faculty_name', header: 'Faculty', hideOnMobile: true },
+          { key: 'amount', header: 'Amount', align: 'right', render: (v: any) => money(v.amount, currency) },
+          { key: 'charged', header: 'Charged', align: 'right', hideOnMobile: true, render: (v: any) => money(v.charged, currency) },
+          { key: 'balance', header: 'Balance', align: 'right', render: (v: any) => <strong className={v.balance < 0 ? 'text-danger' : ''}>{money(v.balance, currency)}</strong> },
+          ...(canEdit
+            ? [{
+                key: '_a',
+                header: '',
+                align: 'right' as const,
+                render: (v: any) => (
+                  <div className="row-actions">
+                    <IconButton label="Edit" onClick={() => open(v)}><Pencil size={16} /></IconButton>
+                    <IconButton label="Remove" className="danger" onClick={() => remove(v)}><Trash2 size={16} /></IconButton>
+                  </div>
+                ),
+              }]
+            : []),
+        ]}
+      />
+      {editing && (
+        <Modal
+          open
+          title={editing === 'new' ? 'New vote' : `Edit vote ${editing.code}`}
+          onClose={() => setEditing(null)}
+          footer={<><Button variant="secondary" onClick={() => setEditing(null)}>Cancel</Button><Button type="submit" form="vote-form" loading={busy}>Save</Button></>}
+        >
+          <VoteFields form={form} setForm={setForm} faculties={editing === 'new' ? myFaculties : []} onSubmit={save} />
+        </Modal>
+      )}
+    </Card>
+  );
+}
+
+function VoteFields({ form, setForm, faculties, onSubmit }: { form: any; setForm: (f: any) => void; faculties: any[]; onSubmit: (e: FormEvent) => void }) {
+  const { university } = useAuth();
+  const set = (k: string) => ({ value: form[k] ?? '', onChange: (e: any) => setForm({ ...form, [k]: e.target.value }) });
+  return (
+    <form id="vote-form" className="form-grid" onSubmit={onSubmit}>
+      {faculties.length > 1 && (
+        <Field label="Faculty *" span={2}>
+          <Select required value={form.faculty_id} onChange={(e) => setForm({ ...form, faculty_id: e.target.value })} options={faculties.map((f) => ({ value: f.id, label: f.name }))} />
+        </Field>
+      )}
+      <Field label="Vote code *">
+        <Input required maxLength={40} placeholder="e.g. 221001" {...set('code')} />
+      </Field>
+      <Field label="Financial year">
+        <Input placeholder="e.g. 2026/2027" {...set('financial_year')} />
+      </Field>
+      <Field label="Vote name *" span={2}>
+        <Input required placeholder="e.g. Part-time lecturers' allowances" {...set('name')} />
+      </Field>
+      <Field label={`Amount (${university?.currency || 'UGX'}) *`} span={2}>
+        <Input required type="number" min={0} step="any" {...set('amount')} />
+      </Field>
+    </form>
+  );
+}
 
 function Budgets() {
   const { university } = useAuth();
@@ -341,7 +466,7 @@ function Budgets() {
 
 // ------------------------------------------------------------------ List
 
-type View = 'mine' | 'queue' | 'all' | 'rates' | 'budgets';
+type View = 'mine' | 'queue' | 'all' | 'completed' | 'rates' | 'budgets';
 
 export default function Claims() {
   const { user, university } = useAuth();
@@ -351,12 +476,21 @@ export default function Claims() {
   const approver = ['admin', 'dean', 'hod', 'hr'].includes(user?.role || '');
   const tabs: { value: View; label: string; count?: number }[] = [
     ...(partTimer ? [{ value: 'mine' as View, label: 'My claims' }] : []),
-    ...(approver ? [{ value: 'queue' as View, label: 'Awaiting me' }, { value: 'all' as View, label: 'All claims' }] : []),
+    ...(approver ? [{ value: 'queue' as View, label: 'Awaiting me' }, { value: 'all' as View, label: 'All claims' }, { value: 'completed' as View, label: 'Completed requisitions' }] : []),
     ...(['admin', 'dean', 'hod', 'hr'].includes(user?.role || '') || partTimer ? [{ value: 'rates' as View, label: 'Pay rates' }] : []),
-    ...(approver ? [{ value: 'budgets' as View, label: 'Budgets' }] : []),
+    ...(approver ? [{ value: 'budgets' as View, label: 'Votes & budgets' }] : []),
   ];
+  const [params] = useSearchParams();
   const [view, setView] = usePersistentState<View>('lms_claims_view', tabs[0]?.value || 'mine');
-  const current = tabs.some((t) => t.value === view) ? view : tabs[0]?.value;
+  // The verification page links here with ?view=completed.
+  const asked = params.get('view') as View | null;
+  const [linked, setLinked] = useState(asked && tabs.some((t) => t.value === asked) ? asked : null);
+  const chosen = linked || view;
+  const current = tabs.some((t) => t.value === chosen) ? chosen : tabs[0]?.value;
+  const choose = (v: View) => {
+    setLinked(null);
+    setView(v);
+  };
   const { data: summary } = useFetch<any>('/api/claims/summary');
   const { data, loading, error } = useFetch<any[]>(current === 'rates' || current === 'budgets' ? null : `/api/claims?view=${current}`);
   const [creating, setCreating] = useState(false);
@@ -410,12 +544,15 @@ export default function Claims() {
           {partTimer && <StatCard label="Paid to me" value={money(summary.mine.paid_total, currency)} tone="success" />}
         </div>
       )}
-      {tabs.length > 1 && <Tabs value={current} onChange={setView} tabs={tabs} />}
+      {tabs.length > 1 && <Tabs value={current} onChange={choose} tabs={tabs} />}
       <ErrorNote error={error} />
       {current === 'rates' ? (
         <Rates />
       ) : current === 'budgets' ? (
-        <Budgets />
+        <div className="stack">
+          <Votes />
+          <Budgets />
+        </div>
       ) : (
         <Card padded={false}>
           <DataTable
@@ -566,15 +703,28 @@ function Decide({ claim, mode, onClose, onDone }: { claim: any; mode: 'approve' 
   const [reference, setReference] = useState('');
   const [busy, setBusy] = useState(false);
   const paying = mode === 'approve' && claim.status === 'hr_verified';
+  const signing = mode === 'approve' && claim.status === 'hod_approved';
   const label = mode === 'reject' ? 'Return for correction' : claim.next_action;
+  const { data: votes, reload: reloadVotes } = useFetch<any[]>(signing ? `/api/claims/votes?faculty_id=${claim.faculty_id}&active=1` : null);
+  const [voteId, setVoteId] = useState('');
+  const [newVote, setNewVote] = useState<any>(null);
+  const vote = (votes || []).find((v) => String(v.id) === voteId) || (votes?.length === 1 ? votes[0] : null);
 
   const go = async (e: FormEvent) => {
     e.preventDefault();
     setBusy(true);
     try {
-      const r = await api(`/api/claims/${claim.id}/${mode}`, { method: 'POST', body: { note, payment_reference: reference } });
-      toast(mode === 'reject' ? 'Claim returned to the lecturer' : paying ? 'Payment recorded' : 'Claim approved and passed on');
+      let chosen = vote?.id;
+      if (signing && newVote) {
+        const created = await api<any>('/api/claims/votes', { method: 'POST', body: { ...newVote, faculty_id: claim.faculty_id, amount: Number(newVote.amount) } });
+        chosen = created.id;
+        reloadVotes();
+      }
+      if (signing && !chosen) throw new Error('Choose the vote this claim is charged to');
+      const r = await api(`/api/claims/${claim.id}/${mode}`, { method: 'POST', body: { note, payment_reference: reference, vote_id: chosen } });
+      toast(mode === 'reject' ? 'Claim returned to the lecturer' : paying ? 'Payment recorded' : claim.status === 'dean_approved' ? 'Final approval given; print the requisition form' : 'Claim signed off and passed on');
       if (r?.budget_warning) toast(r.budget_warning, 'error');
+      if (r?.vote_warning) toast(r.vote_warning, 'error');
       onDone();
       onClose();
     } catch (err) {
@@ -604,6 +754,21 @@ function Decide({ claim, mode, onClose, onDone }: { claim: any; mode: 'approve' 
         <p>
           {claim.title}: <strong>{money(claim.total, claim.currency)}</strong>
         </p>
+        {signing && !newVote && (
+          <Field label="Charge to vote *" help={vote ? `Balance ${money(vote.balance, claim.currency)}, ${money(vote.balance - claim.total, claim.currency)} after this claim` : 'You sign off as Vote Controller against one of the faculty votes.'}>
+            <Select value={vote ? String(vote.id) : ''} onChange={(e) => setVoteId(e.target.value)} placeholder={votes?.length ? 'Choose a vote...' : 'No votes yet'} options={(votes || []).map((v) => ({ value: String(v.id), label: `${v.code} - ${v.name} (balance ${money(v.balance, claim.currency)})` }))} />
+          </Field>
+        )}
+        {signing && (newVote ? (
+          <Card title="New vote">
+            <VoteFields form={newVote} setForm={setNewVote} faculties={[]} onSubmit={(e) => e.preventDefault()} />
+            <Button size="sm" variant="ghost" onClick={() => setNewVote(null)}>Use an existing vote</Button>
+          </Card>
+        ) : (
+          <Button size="sm" variant="ghost" icon={<Plus size={14} />} onClick={() => setNewVote({ code: '', name: '', amount: '', financial_year: '' })}>
+            Create a new vote
+          </Button>
+        ))}
         {paying && (
           <Field label="Payment reference *" help="Voucher, payroll or bank transfer number.">
             <Input required value={reference} onChange={(e) => setReference(e.target.value)} autoFocus />
@@ -618,7 +783,7 @@ function Decide({ claim, mode, onClose, onDone }: { claim: any; mode: 'approve' 
 }
 
 const EVENT_LABEL: Record<string, string> = {
-  created: 'Draft created', submitted: 'Submitted', resubmitted: 'Resubmitted', approved: 'Approved', verified: 'Verified by HR', paid: 'Payment recorded', returned: 'Returned for correction',
+  created: 'Draft created', submitted: 'Signed off and submitted', resubmitted: 'Resubmitted', approved: 'Approved', verified: 'Final approval by HR', paid: 'Payment recorded', returned: 'Returned for correction',
 };
 
 export function ClaimDetail() {
@@ -682,6 +847,11 @@ export function ClaimDetail() {
             <Button variant="secondary" icon={<Printer size={16} />} onClick={() => window.print()}>
               Print
             </Button>
+            {claim.status !== 'draft' && claim.status !== 'rejected' && (
+              <Button variant={claim.cleared ? 'primary' : 'secondary'} icon={<ClipboardCheck size={16} />} onClick={() => download(`/api/claims/${claim.id}/requisition`, `requisition-${claim.id}.pdf`).catch(fail)}>
+                {claim.cleared ? 'Requisition form' : 'Requisition (preview)'}
+              </Button>
+            )}
             {claim.status !== 'draft' && (
               <Button variant="secondary" icon={<FileText size={16} />} onClick={() => download(`/api/claims/${claim.id}/payslip`, `${claim.status === 'paid' ? 'payslip' : 'claim'}-${claim.id}.pdf`).catch(fail)}>
                 {claim.status === 'paid' ? 'Payslip PDF' : 'Claim PDF'}
@@ -693,7 +863,14 @@ export function ClaimDetail() {
               </Button>
             )}
             {claim.can_edit && (
-              <Button icon={<Check size={16} />} loading={busy === 'submit'} onClick={() => run('submit', () => api(`/api/claims/${claim.id}/submit`, { method: 'POST' }), 'Claim submitted to your HoD')}>
+              <Button
+                icon={<Check size={16} />}
+                loading={busy === 'submit'}
+                onClick={async () => {
+                  if (!(await confirm({ title: 'Sign off and submit this claim?', message: CERTIFY, confirmLabel: 'I certify, submit' }))) return;
+                  run('submit', () => api(`/api/claims/${claim.id}/submit`, { method: 'POST' }), 'Claim submitted to your HoD for verification');
+                }}
+              >
                 {claim.status === 'rejected' ? 'Resubmit' : 'Submit claim'}
               </Button>
             )}
@@ -732,6 +909,32 @@ export function ClaimDetail() {
           </Alert>
         )}
         {!claim.teaching_rate && <Alert tone="warning">The Dean has not set a teaching rate for this faculty yet, so teaching hours can't be priced.</Alert>}
+        {claim.status === 'hr_verified' && (
+          <Alert tone="success" title="Cleared by HR">
+            The requisition form is ready to print and submit to Finance.
+          </Alert>
+        )}
+        {claim.sign_offs && (
+          <Card title="Digital signatures" padded={false} actions={<a className="small" href={claim.verify_url} target="_blank" rel="noreferrer">Verify {claim.verify_code}</a>}>
+            <ul className="footprints">
+              {Object.values(claim.sign_offs).map((s: any) => (
+                <li key={s.step} className={s.footprint ? '' : 'missing'}>
+                  <div>
+                    <strong>{s.step}</strong>
+                    <div className="muted small">{s.name ? `${s.name} · ${niceDateTime(s.at)}` : 'Not yet signed off'}</div>
+                  </div>
+                  {s.footprint && <code>{s.footprint}</code>}
+                </li>
+              ))}
+            </ul>
+          </Card>
+        )}
+        {claim.vote && (
+          <Alert tone={claim.vote.balance < 0 ? 'warning' : 'info'} title={`Vote ${claim.vote.code}: ${claim.vote.name}`}>
+            Signed off by the Vote Controller. Balance after signed-off claims: <strong>{money(claim.vote.balance, claim.currency)}</strong>
+            {claim.vote.financial_year ? ` (${claim.vote.financial_year})` : ''}.
+          </Alert>
+        )}
         {claim.status === 'paid' && (
           <Alert tone="success" title="Paid">
             Payment reference <strong>{claim.payment_reference}</strong>
@@ -741,7 +944,7 @@ export function ClaimDetail() {
 
         <div className="stat-grid">
           <StatCard label="Teaching hours" value={qty(teaching.reduce((t: number, l: any) => t + l.quantity, 0))} hint={plural(teaching.length, 'lecture')} />
-          <StatCard label="Teaching" value={money(teachingTotal, claim.currency)} hint={claim.teaching_rate ? `${money(claim.teaching_rate.amount, claim.currency)} per hour` : undefined} />
+          <StatCard label="Teaching" value={money(teachingTotal, claim.currency)} hint={claim.teaching_rates?.length > 1 ? 'Rates by programme level' : claim.teaching_rate ? `${money(claim.teaching_rate.amount, claim.currency)} per hour` : undefined} />
           <StatCard label="Tasks" value={money(taskTotal, claim.currency)} hint={plural(tasks.length, 'item')} />
           <StatCard label="Total claimed" value={money(claim.total, claim.currency)} tone="primary" />
           {claim.verification?.lectures > 0 && (
@@ -792,7 +995,7 @@ export function ClaimDetail() {
                 ),
               },
               { key: 'quantity', header: 'Hours', align: 'right', render: (l: any) => qty(l.quantity) },
-              { key: 'unit_price', header: 'Rate', align: 'right', hideOnMobile: true, render: (l: any) => money(l.unit_price, claim.currency) },
+              { key: 'unit_price', header: 'Rate', align: 'right', hideOnMobile: true, render: (l: any) => <>{money(l.unit_price, claim.currency)}{l.program_level && <div className="muted small">{l.program_level}</div>}</> },
               { key: 'amount', header: 'Amount', align: 'right', render: (l: any) => <strong>{money(l.amount, claim.currency)}</strong> },
             ]}
           />

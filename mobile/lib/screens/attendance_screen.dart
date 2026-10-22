@@ -25,6 +25,14 @@ class AttendanceScreen extends StatelessWidget {
       child: Scaffold(
         appBar: AppBar(
           title: const BrandTitle('Attendance'),
+          actions: [
+            if (app.teaches || app.isManager || app.isClassRep)
+              IconButton(
+                tooltip: 'Download attendance',
+                icon: const Icon(Icons.download_outlined),
+                onPressed: () => showModalBottomSheet(context: context, isScrollControlled: true, showDragHandle: true, builder: (_) => const _DownloadSheet()),
+              ),
+          ],
           bottom: tabs.length > 1 ? TabBar(isScrollable: true, tabAlignment: TabAlignment.start, tabs: [for (final t in tabs) Tab(text: t.$1)]) : null,
         ),
         body: tabs.isEmpty
@@ -355,7 +363,20 @@ class _RegisterDetailPageState extends State<RegisterDetailPage> {
   Widget build(BuildContext context) {
     final api = context.read<AppState>().api;
     return Scaffold(
-      appBar: AppBar(title: const Text('Attendance register')),
+      appBar: AppBar(
+        title: const Text('Attendance register'),
+        actions: [
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.download_outlined),
+            tooltip: 'Download',
+            onSelected: (f) => _openFile(context, '/api/attendance/registers/${widget.id}/export', f),
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 'pdf', child: ListTile(leading: Icon(Icons.picture_as_pdf_outlined), title: Text('PDF'))),
+              PopupMenuItem(value: 'xlsx', child: ListTile(leading: Icon(Icons.table_view_outlined), title: Text('Excel'))),
+            ],
+          ),
+        ],
+      ),
       body: AsyncView<Map<String, dynamic>>(
         key: ValueKey('reg-${widget.id}-$_version'),
         load: () async => await api.get('/api/attendance/registers/${widget.id}') as Map<String, dynamic>,
@@ -491,6 +512,90 @@ class _CorrectionsState extends State<_Corrections> {
             ),
         ]);
       },
+    );
+  }
+}
+
+/// Opens a PDF or Excel file the API builds, in the browser.
+Future<void> _openFile(BuildContext context, String path, String format) async {
+  try {
+    await context.read<AppState>().openExport('$path${path.contains('?') ? '&' : '?'}format=$format');
+  } catch (e) {
+    if (context.mounted) showError(context, e);
+  }
+}
+
+/// Term attendance sheet for one class of a course unit: every lecture, P / A and each student's percentage.
+class _DownloadSheet extends StatefulWidget {
+  const _DownloadSheet();
+
+  @override
+  State<_DownloadSheet> createState() => _DownloadSheetState();
+}
+
+class _DownloadSheetState extends State<_DownloadSheet> {
+  Map<String, dynamic>? _data;
+  Object? _error;
+  int? _allocation;
+  int? _class;
+
+  @override
+  void initState() {
+    super.initState();
+    context.read<AppState>().api.get('/api/attendance/sheets').then((d) {
+      if (mounted) setState(() => _data = d as Map<String, dynamic>);
+    }).catchError((e) {
+      if (mounted) setState(() => _error = e);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final items = ((_data?['items'] as List?) ?? const []).cast<Map<String, dynamic>>();
+    final item = items.where((i) => i['allocation_id'] == _allocation).firstOrNull ?? items.firstOrNull;
+    final classes = ((item?['classes'] as List?) ?? const []).cast<Map<String, dynamic>>();
+    final cls = classes.where((c) => c['id'] == _class).firstOrNull ?? classes.firstOrNull;
+    final path = item == null || cls == null ? null : '/api/attendance/sheets/export?allocation_id=${item['allocation_id']}&class_id=${cls['id']}';
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+      child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Text('Download attendance', style: Theme.of(context).textTheme.titleLarge),
+        const SizedBox(height: 4),
+        const Text('One sheet per class: every lecture with approved attendance, P or A for each student, and their percentage.'),
+        const SizedBox(height: 12),
+        if (_error != null) Text('$_error', style: TextStyle(color: Theme.of(context).colorScheme.error)),
+        if (_data == null && _error == null) const Center(child: CircularProgressIndicator()),
+        if (_data != null && items.isEmpty) const Text('No course units to download this term.'),
+        if (item != null) ...[
+          DropdownButtonFormField<int>(
+            initialValue: item['allocation_id'] as int,
+            isExpanded: true,
+            decoration: const InputDecoration(labelText: 'Course unit'),
+            items: [for (final i in items) DropdownMenuItem(value: i['allocation_id'] as int, child: Text('${i['course_code']} ${i['course_name']}', overflow: TextOverflow.ellipsis))],
+            onChanged: (v) => setState(() {
+              _allocation = v;
+              _class = null;
+            }),
+          ),
+          if (classes.length > 1) ...[
+            const SizedBox(height: 10),
+            DropdownButtonFormField<int>(
+              key: ValueKey(item['allocation_id']),
+              initialValue: cls!['id'] as int,
+              isExpanded: true,
+              decoration: const InputDecoration(labelText: 'Class'),
+              items: [for (final c in classes) DropdownMenuItem(value: c['id'] as int, child: Text('${c['name']}'))],
+              onChanged: (v) => setState(() => _class = v),
+            ),
+          ],
+          const SizedBox(height: 16),
+          Row(children: [
+            Expanded(child: OutlinedButton.icon(onPressed: path == null ? null : () => _openFile(context, path, 'pdf'), icon: const Icon(Icons.picture_as_pdf_outlined), label: const Text('PDF'))),
+            const SizedBox(width: 8),
+            Expanded(child: FilledButton.icon(onPressed: path == null ? null : () => _openFile(context, path, 'xlsx'), icon: const Icon(Icons.table_view_outlined), label: const Text('Excel'))),
+          ]),
+        ],
+      ]),
     );
   }
 }

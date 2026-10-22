@@ -23,6 +23,7 @@ import Register from './pages/Register';
 import Reports from './pages/Reports';
 import Timetable from './pages/Timetable';
 import Users from './pages/Users';
+import Verify from './pages/Verify';
 import Classes from './pages/setup/Classes';
 import CourseUnits from './pages/setup/CourseUnits';
 import { ProgrammeDetail, Programmes } from './pages/setup/Programmes';
@@ -68,6 +69,8 @@ export default function App() {
           <Routes>
             <Route path="/login" element={<Login />} />
             <Route path="/register" element={<Register />} />
+            <Route path="/verify" element={<Verify />} />
+            <Route path="/verify/:code" element={<Verify />} />
             <Route
               element={
                 <RequireAuth>

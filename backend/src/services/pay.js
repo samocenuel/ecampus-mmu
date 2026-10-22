@@ -6,19 +6,45 @@ import { toMinutes } from '../util.js';
 
 /** Where a claim is and who acts next. `next` is the status an approval moves it to. */
 export const STAGES = {
-  submitted: { label: 'Awaiting HoD', actor: 'hod', next: 'hod_approved', action: 'Approve' },
-  hod_approved: { label: 'Awaiting Dean', actor: 'dean', next: 'dean_approved', action: 'Approve' },
-  dean_approved: { label: 'Awaiting HR check', actor: 'hr', next: 'hr_verified', action: 'Verify' },
-  hr_verified: { label: 'Awaiting payment', actor: 'hr', next: 'paid', action: 'Mark as paid' },
+  submitted: { label: 'Awaiting HoD verification', actor: 'hod', next: 'hod_approved', action: 'Verify' },
+  hod_approved: { label: 'Awaiting Dean sign-off', actor: 'dean', next: 'dean_approved', action: 'Sign off and charge vote' },
+  dean_approved: { label: 'Awaiting HR approval', actor: 'hr', next: 'hr_verified', action: 'Final approval' },
+  hr_verified: { label: 'Cleared, awaiting payment', actor: 'hr', next: 'paid', action: 'Record payment' },
 };
+
+/** What a vote has committed: claims the Vote Controller signed off, up to payment. */
+export function voteCharged(voteId, exceptClaimId = 0) {
+  return round2(
+    q.get("SELECT COALESCE(SUM(total), 0) AS t FROM pay_claims WHERE vote_id = ? AND id <> ? AND status IN ('dean_approved', 'hr_verified', 'paid')", voteId, exceptClaimId).t,
+  );
+}
 export const EDITABLE_STATUSES = ['draft', 'rejected'];
 
 export const round2 = (n) => Math.round(Number(n || 0) * 100) / 100;
 
 export const isPartTimer = (user) => user.employment_type === 'part_time' && ['lecturer', 'hod', 'dean'].includes(user.role);
 
+/** Programme levels a rate can apply to (programmes.level uses the same names). */
+export const PROGRAM_LEVELS = ['Short course', 'Certificate', 'Diploma', 'Bachelor', 'Postgraduate Diploma', 'Masters', 'PhD'];
+
+/** The faculty's active teaching rates: a general one and/or one per programme level. */
+export function teachingRates(facultyId) {
+  return q.all("SELECT * FROM pay_rates WHERE faculty_id = ? AND kind = 'teaching' AND active = 1 ORDER BY program_level IS NOT NULL, id", facultyId);
+}
+
+/** The faculty's general teaching rate (or its first level rate when there is no general one). */
 export function teachingRate(facultyId) {
-  return q.get("SELECT * FROM pay_rates WHERE faculty_id = ? AND kind = 'teaching' AND active = 1 ORDER BY id LIMIT 1", facultyId);
+  return teachingRates(facultyId)[0];
+}
+
+/**
+ * The rate for a lecture to classes of these programme levels: that level's own rate (the highest
+ * when a combined class mixes levels), otherwise the faculty's general teaching rate.
+ */
+export function rateForLevels(rates, levels) {
+  const own = rates.filter((r) => r.program_level && levels.includes(r.program_level));
+  if (own.length) return own.reduce((best, r) => (r.amount > best.amount ? r : best));
+  return rates.find((r) => !r.program_level) || null;
 }
 
 const APPROVED_COVER = `SELECT 1 FROM leave_covers lc JOIN leave_requests lr ON lr.id = lc.leave_id
@@ -35,7 +61,7 @@ export function claimableLectures(lecturerId, from, to, exceptClaimId = 0) {
     `SELECT s.id AS session_id, r.lecture_date AS work_date,
             COALESCE(MAX(sc.new_start), s.start_time) AS start_time, COALESCE(MAX(sc.new_end), s.end_time) AS end_time,
             cu.code AS course_unit_code, cu.name AS course_unit_name,
-            GROUP_CONCAT(c.name, ', ') AS class_names,
+            GROUP_CONCAT(c.name, ', ') AS class_names, GROUP_CONCAT(DISTINCT p.level) AS levels,
             SUM((SELECT COUNT(*) FROM attendance_records ar WHERE ar.register_id = r.id AND ar.present = 1)) AS students_present,
             SUM((SELECT COUNT(*) FROM attendance_records ar WHERE ar.register_id = r.id)) AS students_total,
             (SELECT COUNT(*) FROM checkins ch JOIN checkin_sessions cs ON cs.id = ch.checkin_session_id
@@ -45,6 +71,7 @@ export function claimableLectures(lecturerId, from, to, exceptClaimId = 0) {
        JOIN allocations a ON a.id = s.allocation_id
        JOIN course_units cu ON cu.id = a.course_unit_id
        JOIN classes c ON c.id = r.class_id
+       JOIN programs p ON p.id = c.program_id
        LEFT JOIN session_changes sc ON sc.session_id = s.id AND sc.action = 'move' AND sc.new_date = r.lecture_date
       WHERE r.status = 'approved' AND r.lecture_date BETWEEN ? AND ?
         AND ((a.lecturer_id = ? AND NOT EXISTS (${APPROVED_COVER})) OR EXISTS (${APPROVED_COVER} AND lc.substitute_id = ?))
@@ -60,7 +87,7 @@ export function claimableLectures(lecturerId, from, to, exceptClaimId = 0) {
   );
   return rows
     .filter((r) => !uni?.claims_require_checkin || r.self_checkins > 0)
-    .map((r) => ({ ...r, hours: round2((toMinutes(r.end_time) - toMinutes(r.start_time)) / 60) }));
+    .map((r) => ({ ...r, levels: r.levels ? r.levels.split(',') : [], hours: round2((toMinutes(r.end_time) - toMinutes(r.start_time)) / 60) }));
 }
 
 /** The faculty's rate used for invigilation duties (marked by the Dean), if any. */
@@ -109,7 +136,7 @@ export function pendingLectureCount(lecturerId, from, to) {
  * claimable in its period, priced at today's rates.
  */
 export function refreshTeachingLines(claim) {
-  const rate = teachingRate(claim.faculty_id);
+  const rates = teachingRates(claim.faculty_id);
   q.run("DELETE FROM pay_claim_lines WHERE claim_id = ? AND (kind = 'teaching' OR exam_id IS NOT NULL)", claim.id);
   const inv = invigilationRate(claim.faculty_id);
   if (inv) {
@@ -124,15 +151,16 @@ export function refreshTeachingLines(claim) {
     }
   }
   for (const l of claimableLectures(claim.lecturer_id, claim.period_start, claim.period_end, claim.id)) {
+    const rate = rateForLevels(rates, l.levels);
     const price = rate ? rate.amount : 0;
     q.run(
       `INSERT INTO pay_claim_lines (claim_id, kind, rate_id, rate_name, unit, unit_price, quantity, amount, work_date,
                                     start_time, end_time, session_id, course_unit_code, course_unit_name, class_names,
-                                    students_present, students_total, self_checkins)
-       VALUES (?, 'teaching', ?, ?, 'hour', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                                    students_present, students_total, self_checkins, program_level)
+       VALUES (?, 'teaching', ?, ?, 'hour', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       claim.id, rate?.id ?? null, rate?.name || 'Teaching', price, l.hours, round2(price * l.hours), l.work_date,
       l.start_time, l.end_time, l.session_id, l.course_unit_code, l.course_unit_name, l.class_names,
-      l.students_present, l.students_total, l.self_checkins,
+      l.students_present, l.students_total, l.self_checkins, l.levels.join(', ') || null,
     );
   }
   return recalcTotal(claim.id);

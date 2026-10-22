@@ -487,8 +487,33 @@ describe('Part-time pay claims', () => {
 
     assert.equal((await api('POST', `/api/claims/${id}/approve`, { token: hod })).data.status, 'hod_approved');
     assert.equal((await api('GET', `/api/claims/${id}`, { token: otherDean })).status, 404, 'other faculties cannot see it');
-    assert.equal((await api('POST', `/api/claims/${id}/approve`, { token: dean })).data.status, 'dean_approved');
+    // The Dean signs off as Vote Controller: the claim must be charged to a vote, which the Dean can create.
+    assert.equal((await api('POST', `/api/claims/${id}/approve`, { token: dean })).status, 400, 'the Dean must choose a vote');
+    const fst = q.get("SELECT id FROM faculties WHERE code = 'FST'").id;
+    const vote = await api('POST', '/api/claims/votes', { token: dean, body: { faculty_id: fst, code: 'FST-TEST-01', name: 'Test vote', amount: 1000000, financial_year: '2026/2027' } });
+    assert.equal(vote.status, 201);
+    assert.equal((await api('POST', '/api/claims/votes', { token: otherDean, body: { faculty_id: fst, code: 'X', name: 'X', amount: 1 } })).status, 403, 'only the faculty Dean creates its votes');
+    const signed = await api('POST', `/api/claims/${id}/approve`, { token: dean, body: { vote_id: vote.data.id } });
+    assert.equal(signed.data.status, 'dean_approved');
+    const pending = await api('GET', `/api/claims/${id}/requisition`, { token: hr });
+    assert.equal(pending.type, 'application/pdf', 'the requisition can be previewed before clearing');
     assert.equal((await api('POST', `/api/claims/${id}/approve`, { token: hr })).data.status, 'hr_verified');
+    const detail = (await api('GET', `/api/claims/${id}`, { token: hr })).data;
+    assert.equal(detail.cleared, true);
+    assert.equal(detail.vote.code, 'FST-TEST-01');
+    assert.equal(detail.vote.balance, 1000000 - detail.total);
+    assert.equal((await api('GET', `/api/claims/${id}/requisition`, { token: esther })).type, 'application/pdf');
+    // Anyone holding the printed form checks it against the system without signing in.
+    assert.match(detail.verify_code, /^[A-Z2-9]{5}-[A-Z2-9]{5}$/);
+    const check = await api('GET', `/api/verify/${detail.verify_code.toLowerCase()}`);
+    assert.equal(check.status, 200);
+    assert.equal(check.data.requisition.amount, detail.total);
+    assert.equal(check.data.requisition.cleared, true);
+    assert.match(check.data.requisition.lecturer, /Esther Atim/);
+    assert.deepEqual(check.data.sign_offs.map((s) => Boolean(s.footprint)), [true, true, true, true], 'claimant, HoD, Dean and HR each left a footprint');
+    assert.deepEqual(check.data.sign_offs.map((s) => s.footprint), Object.values(detail.sign_offs).map((s) => s.footprint));
+    assert.equal((await api('GET', '/api/verify/ABCDE-FGHJK')).status, 404);
+    assert.ok((await api('GET', '/api/claims?view=completed', { token: hr })).data.some((c) => c.id === id));
     assert.equal((await api('POST', `/api/claims/${id}/approve`, { token: hr })).status, 400, 'payment needs a reference');
     const paid = await api('POST', `/api/claims/${id}/approve`, { token: hr, body: { payment_reference: 'PV-TEST-1' } });
     assert.equal(paid.data.status, 'paid');
@@ -746,5 +771,66 @@ describe('Teaching operations, exams and profiles', async () => {
     form.append('photo', new Blob([png], { type: 'image/png' }), 'me.png');
     const photo = await fetch(`${base}/api/auth/me/photo`, { method: 'POST', headers: { Authorization: `Bearer ${first.data.token}` }, body: form }).then((r) => r.json());
     assert.match(photo.user.photo_url, /^\/uploads\/photos\//);
+
+    // An administrator resets a forgotten password; the user must choose a new one again.
+    const lecturerId = userByEmail('new.lecturer@demo.edu').id;
+    const reset = await api('POST', `/api/users/${lecturerId}/reset-password`, { token: admin });
+    assert.equal(reset.status, 200);
+    assert.equal((await api('POST', '/api/auth/login', { body: { email: 'new.lecturer@demo.edu', password: 'MyOwnPass-2026' } })).status, 401, 'the old password stops working');
+    const again = await api('POST', '/api/auth/login', { body: { email: 'new.lecturer@demo.edu', password: reset.data.temporary_password } });
+    assert.equal(again.data.user.must_change_password, true);
+    // The shared demo accounts keep signing in without a password prompt.
+    const demoLecturer = userByEmail('brian.kato@demo.edu');
+    assert.equal((await api('POST', `/api/users/${demoLecturer.id}/reset-password`, { token: admin })).status, 403);
+    assert.equal((await api('PUT', `/api/users/${demoLecturer.id}`, { token: admin, body: { password: 'Something-123' } })).status, 403);
+  });
+
+  test('attendance downloads: one lecture as PDF or Excel, and a term sheet per course unit and class', async () => {
+    const lecturer = await login('brian.kato@demo.edu');
+    const reg = q.get(
+      `SELECT r.id FROM attendance_registers r JOIN timetable_sessions s ON s.id = r.session_id JOIN allocations a ON a.id = s.allocation_id
+        WHERE a.lecturer_id = ? AND r.status = 'approved' LIMIT 1`,
+      userByEmail('brian.kato@demo.edu').id,
+    );
+    const pdf = await api('GET', `/api/attendance/registers/${reg.id}/export?format=pdf`, { token: lecturer });
+    assert.equal(pdf.type, 'application/pdf');
+    const xlsx = await api('GET', `/api/attendance/registers/${reg.id}/export?format=xlsx`, { token: lecturer });
+    assert.equal(xlsx.status, 200);
+    assert.match(xlsx.type, /spreadsheetml/);
+
+    const sheets = (await api('GET', '/api/attendance/sheets', { token: lecturer })).data;
+    assert.ok(sheets.items.length > 0, 'the lecturer sees their course units');
+    const item = sheets.items.find((i) => i.registers > 0);
+    const sheet = await api('GET', `/api/attendance/sheets/export?allocation_id=${item.allocation_id}&class_id=${item.classes[0].id}&format=xlsx`, { token: lecturer });
+    assert.equal(sheet.status, 200);
+    assert.equal((await api('GET', `/api/attendance/sheets/export?allocation_id=${item.allocation_id}&class_id=${item.classes[0].id}&format=pdf`, { token: lecturer })).type, 'application/pdf');
+    const student = await login('student.bscs1@students.demo.edu');
+    assert.equal((await api('GET', `/api/attendance/sheets/export?allocation_id=${item.allocation_id}&class_id=${item.classes[0].id}`, { token: student })).status, 403);
+  });
+
+  test('teaching rates by programme level: each lecture is paid at its classes\' level rate, else the general rate', async () => {
+    const dean = await login('dean.fst@demo.edu');
+    const fst = q.get("SELECT id FROM faculties WHERE code = 'FST'").id;
+    const rates = (await api('GET', '/api/claims/rates', { token: dean })).data.filter((r) => r.kind === 'teaching' && r.faculty_id === fst);
+    assert.ok(rates.some((r) => !r.program_level) && rates.some((r) => r.program_level === 'Masters'));
+    const dup = await api('POST', '/api/claims/rates', { token: dean, body: { faculty_id: fst, kind: 'teaching', name: 'Masters again', amount: 1, program_level: 'Masters' } });
+    assert.equal(dup.status, 400, 'one teaching rate per level');
+    assert.equal((await api('POST', '/api/claims/rates', { token: dean, body: { faculty_id: fst, kind: 'teaching', name: 'Bad', amount: 1, program_level: 'Kindergarten' } })).status, 400);
+    const bachelor = await api('POST', '/api/claims/rates', { token: dean, body: { faculty_id: fst, kind: 'teaching', name: 'Teaching: Bachelor', amount: 55000, program_level: 'Bachelor' } });
+    assert.equal(bachelor.status, 201);
+
+    // Esther teaches Bachelor classes, so her lectures move to the Bachelor rate.
+    const esther = await login('esther.atim@demo.edu');
+    const { refreshTeachingLines } = await import('../src/services/pay.js');
+    const claim = q.get(
+      "SELECT * FROM pay_claims WHERE lecturer_id = ? AND EXISTS (SELECT 1 FROM pay_claim_lines l WHERE l.claim_id = pay_claims.id AND l.kind = 'teaching') LIMIT 1",
+      userByEmail('esther.atim@demo.edu').id,
+    );
+    refreshTeachingLines(claim);
+    const lines = q.all("SELECT unit_price, program_level FROM pay_claim_lines WHERE claim_id = ? AND kind = 'teaching'", claim.id);
+    assert.ok(lines.length > 0);
+    assert.ok(lines.every((l) => l.unit_price === 55000 && l.program_level === 'Bachelor'));
+    const preview = (await api('GET', `/api/claims/preview?from=${addDays(today(), -20)}&to=${today()}`, { token: esther })).data;
+    assert.ok(preview.rates.length >= 2 && typeof preview.estimate === 'number');
   });
 });

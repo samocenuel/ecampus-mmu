@@ -1,12 +1,47 @@
 // SaaS operator view: every university (tenant) on the platform.
+import { useState } from 'react';
 import { api, assetUrl } from '../api';
 import { useFeedback } from '../components/feedback';
-import { Badge, Button, Card, DataTable, ErrorNote, PageHeader, StatCard } from '../components/ui';
+import { Badge, Button, Card, DataTable, ErrorNote, Modal, PageHeader, StatCard } from '../components/ui';
 import { useFetch } from '../hooks';
+import { TempInfo, TempPassword } from './Users';
+
+/** A university's administrators; the platform owner resets one who is locked out. */
+function Admins({ university, onClose }: { university: any; onClose: () => void }) {
+  const { data, loading, error } = useFetch<any[]>(`/api/platform/universities/${university.id}/admins`);
+  const { fail, confirm } = useFeedback();
+  const [temp, setTemp] = useState<TempInfo | null>(null);
+  const reset = async (a: any) => {
+    if (!(await confirm({ title: `Reset ${a.name}'s password?`, message: 'Their current password stops working. Give them the temporary password; they choose a new one when they sign in.', confirmLabel: 'Reset password' }))) return;
+    try {
+      const r = await api<any>(`/api/platform/users/${a.id}/reset-password`, { method: 'POST' });
+      setTemp({ name: r.name, email: r.email, password: r.temporary_password, reset: true });
+    } catch (err) {
+      fail(err);
+    }
+  };
+  return (
+    <Modal open onClose={onClose} title={`Administrators: ${university.name}`} footer={<Button variant="secondary" onClick={onClose}>Close</Button>}>
+      <ErrorNote error={error} />
+      <DataTable
+        rows={data}
+        loading={loading}
+        empty="No administrator accounts"
+        columns={[
+          { key: 'name', header: 'Administrator', render: (a: any) => <><strong>{a.name}</strong><div className="muted small">{a.email}</div></> },
+          { key: 'active', header: 'Status', render: (a: any) => (a.active ? (a.must_change_password ? <Badge tone="warning">Temporary password</Badge> : <Badge tone="success">Active</Badge>) : <Badge>Inactive</Badge>) },
+          { key: '_a', header: '', align: 'right', render: (a: any) => (a.demo ? <span className="muted small">Demo</span> : <Button size="sm" variant="secondary" onClick={() => reset(a)}>Reset password</Button>) },
+        ]}
+      />
+      <TempPassword info={temp} onClose={() => setTemp(null)} />
+    </Modal>
+  );
+}
 
 export default function Platform() {
   const { data, loading, error, reload } = useFetch<any[]>('/api/platform/universities');
   const { toast, fail, confirm } = useFeedback();
+  const [admins, setAdmins] = useState<any>(null);
 
   const toggle = async (u: any) => {
     if (u.active && !(await confirm({ title: `Suspend ${u.name}?`, message: 'Its users will not be able to sign in until it is reactivated.', confirmLabel: 'Suspend', tone: 'danger' }))) return;
@@ -61,14 +96,20 @@ export default function Platform() {
               header: '',
               align: 'right',
               render: (u) => (
-                <Button size="sm" variant={u.active ? 'secondary' : 'primary'} onClick={() => toggle(u)}>
-                  {u.active ? 'Suspend' : 'Reactivate'}
-                </Button>
+                <div className="row-actions">
+                  <Button size="sm" variant="ghost" onClick={() => setAdmins(u)}>
+                    Admins
+                  </Button>
+                  <Button size="sm" variant={u.active ? 'secondary' : 'primary'} onClick={() => toggle(u)}>
+                    {u.active ? 'Suspend' : 'Reactivate'}
+                  </Button>
+                </div>
               ),
             },
           ]}
         />
       </Card>
+      {admins && <Admins university={admins} onClose={() => setAdmins(null)} />}
     </>
   );
 }

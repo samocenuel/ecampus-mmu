@@ -4,11 +4,12 @@ import { Router } from 'express';
 import { requireRole } from '../auth.js';
 import { insert, q, tx } from '../db.js';
 import { facultyIdsForDean, managedDepartmentIds, placeholders } from '../scope.js';
-import { claimsXlsx, payslipPdf } from '../services/exporter.js';
+import { claimsXlsx, payslipPdf, requisitionPdf } from '../services/exporter.js';
 import { notify } from '../services/notify.js';
+import { ensureVerifyCode, formatCode, publicBase, signOffs } from '../services/requisition.js';
 import {
   canAct, claimableLectures, claimScope, claimSelect, claimSummary, EDITABLE_STATUSES, isPartTimer, nextActors, pendingLectureCount,
-  recalcTotal, refreshTeachingLines, repriceTaskLines, round2, STAGES, teachingRate,
+  PROGRAM_LEVELS, rateForLevels, voteCharged, recalcTotal, refreshTeachingLines, repriceTaskLines, round2, STAGES, teachingRate, teachingRates,
 } from '../services/pay.js';
 import { badRequest, forbidden, notFound, pick, requireFields, slugify, toInt, zonedNow } from '../util.js';
 
@@ -43,7 +44,11 @@ function assertManageRates(user, facultyId) {
 }
 
 function cleanRate(body) {
-  const data = pick(body, ['faculty_id', 'kind', 'name', 'unit', 'amount', 'description', 'active', 'code']);
+  const data = pick(body, ['faculty_id', 'kind', 'name', 'unit', 'amount', 'description', 'active', 'code', 'program_level']);
+  if (data.program_level !== undefined) {
+    data.program_level = data.program_level ? String(data.program_level).trim() : null;
+    if (data.program_level && !PROGRAM_LEVELS.includes(data.program_level)) throw badRequest(`Programme level must be one of: ${PROGRAM_LEVELS.join(', ')}`);
+  }
   if (data.code !== undefined) {
     data.code = data.code === 'invigilation' || data.code === true ? 'invigilation' : null;
     if (data.code) data.unit = 'hour';
@@ -90,8 +95,8 @@ router.post('/rates', requireRole('admin', 'dean'), (req, res) => {
   requireFields(req.body, ['faculty_id', 'name', 'amount']);
   const data = cleanRate({ kind: 'task', unit: 'hour', ...req.body });
   assertManageRates(req.user, data.faculty_id);
-  if (data.kind === 'teaching' && teachingRate(data.faculty_id)) {
-    throw badRequest('This faculty already has a teaching rate. Edit it instead.');
+  if (data.kind === 'teaching' && q.get("SELECT 1 FROM pay_rates WHERE faculty_id = ? AND kind = 'teaching' AND program_level IS ?", data.faculty_id, data.program_level ?? null)) {
+    throw badRequest(data.program_level ? `This faculty already has a teaching rate for ${data.program_level} programmes. Edit it instead.` : 'This faculty already has a general teaching rate. Edit it, or add a rate for a programme level.');
   }
   if (data.code) q.run('UPDATE pay_rates SET code = NULL WHERE faculty_id = ? AND code = ?', data.faculty_id, data.code);
   const id = insert('pay_rates', { ...data, university_id: req.uid, updated_by: req.user.id });
@@ -108,6 +113,10 @@ router.put('/rates/:id', requireRole('admin', 'dean'), (req, res) => {
   if (rate.kind === 'teaching') {
     data.unit = 'hour';
     delete data.code;
+    if (data.program_level !== undefined && (data.program_level ?? null) !== (rate.program_level ?? null)
+        && q.get("SELECT 1 FROM pay_rates WHERE faculty_id = ? AND kind = 'teaching' AND program_level IS ? AND id <> ?", rate.faculty_id, data.program_level ?? null, rate.id)) {
+      throw badRequest(`This faculty already has a teaching rate for ${data.program_level || 'all programme levels'}`);
+    }
   }
   if (data.code) q.run('UPDATE pay_rates SET code = NULL WHERE faculty_id = ? AND code = ? AND id <> ?', rate.faculty_id, data.code, rate.id);
   const keys = Object.keys(data);
@@ -128,6 +137,97 @@ router.delete('/rates/:id', requireRole('admin', 'dean'), (req, res) => {
   assertManageRates(req.user, rate.faculty_id);
   // Claims keep the name and price they were made with.
   q.run('DELETE FROM pay_rates WHERE id = ?', rate.id);
+  res.json({ ok: true });
+});
+
+// ------------------------------------------------------------------- Votes
+
+const voteRow = (v) => {
+  const charged = voteCharged(v.id);
+  return { ...v, charged, balance: round2(v.amount - charged) };
+};
+
+function cleanVote(body) {
+  const data = pick(body, ['code', 'name', 'amount', 'financial_year', 'active']);
+  if (data.code !== undefined) {
+    data.code = String(data.code).trim();
+    if (!data.code || data.code.length > 40) throw badRequest('Enter the vote code (up to 40 characters)');
+  }
+  if (data.name !== undefined) {
+    data.name = String(data.name).trim();
+    if (!data.name) throw badRequest('Enter the vote name');
+  }
+  if (data.amount !== undefined) {
+    data.amount = Number(data.amount);
+    if (!(data.amount >= 0) || data.amount > 1e12) throw badRequest('Enter a valid vote amount');
+  }
+  if (data.financial_year !== undefined) data.financial_year = String(data.financial_year || '').trim() || null;
+  if (data.active !== undefined) data.active = data.active ? 1 : 0;
+  return data;
+}
+
+router.get('/votes', (req, res) => {
+  if (!['admin', 'dean', 'hod', 'hr'].includes(req.user.role)) throw forbidden();
+  const where = ['v.university_id = ?'];
+  const params = [req.uid];
+  if (req.user.role === 'dean') {
+    const facs = facultyIdsForDean(req.user);
+    if (!facs.length) return res.json([]);
+    where.push(`v.faculty_id IN (${placeholders(facs)})`);
+    params.push(...facs);
+  } else if (req.user.role === 'hod') {
+    where.push('v.faculty_id = ?');
+    params.push(req.user.faculty_id);
+  }
+  if (req.query.faculty_id) {
+    where.push('v.faculty_id = ?');
+    params.push(toInt(req.query.faculty_id));
+  }
+  if (req.query.active !== undefined) where.push('v.active = 1');
+  res.json(
+    q
+      .all(
+        `SELECT v.*, f.name AS faculty_name, u.name AS created_by_name FROM pay_votes v JOIN faculties f ON f.id = v.faculty_id
+           LEFT JOIN users u ON u.id = v.created_by WHERE ${where.join(' AND ')} ORDER BY f.name, v.active DESC, v.code`,
+        ...params,
+      )
+      .map(voteRow),
+  );
+});
+
+router.post('/votes', requireRole('admin', 'dean'), (req, res) => {
+  requireFields(req.body, ['faculty_id', 'code', 'name', 'amount']);
+  const data = cleanVote(req.body);
+  const facultyId = toInt(req.body.faculty_id);
+  assertManageRates(req.user, facultyId);
+  if (q.get('SELECT 1 FROM pay_votes WHERE faculty_id = ? AND code = ?', facultyId, data.code)) throw badRequest(`Vote ${data.code} already exists for this faculty`);
+  const id = insert('pay_votes', { ...data, university_id: req.uid, faculty_id: facultyId, created_by: req.user.id });
+  res.status(201).json(voteRow(q.get('SELECT * FROM pay_votes WHERE id = ?', id)));
+});
+
+router.put('/votes/:id', requireRole('admin', 'dean'), (req, res) => {
+  const vote = q.get('SELECT * FROM pay_votes WHERE id = ? AND university_id = ?', toInt(req.params.id), req.uid);
+  if (!vote) throw notFound('Vote');
+  assertManageRates(req.user, vote.faculty_id);
+  const data = cleanVote(req.body);
+  if (data.code && data.code !== vote.code && q.get('SELECT 1 FROM pay_votes WHERE faculty_id = ? AND code = ? AND id <> ?', vote.faculty_id, data.code, vote.id)) {
+    throw badRequest(`Vote ${data.code} already exists for this faculty`);
+  }
+  const keys = Object.keys(data);
+  if (keys.length) q.run(`UPDATE pay_votes SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`, ...keys.map((k) => data[k]), vote.id);
+  res.json(voteRow(q.get('SELECT * FROM pay_votes WHERE id = ?', vote.id)));
+});
+
+router.delete('/votes/:id', requireRole('admin', 'dean'), (req, res) => {
+  const vote = q.get('SELECT * FROM pay_votes WHERE id = ? AND university_id = ?', toInt(req.params.id), req.uid);
+  if (!vote) throw notFound('Vote');
+  assertManageRates(req.user, vote.faculty_id);
+  // A vote that claims were charged to is closed rather than deleted, so their requisitions keep it.
+  if (q.get('SELECT 1 FROM pay_claims WHERE vote_id = ?', vote.id)) {
+    q.run('UPDATE pay_votes SET active = 0 WHERE id = ?', vote.id);
+    return res.json({ ok: true, closed: true });
+  }
+  q.run('DELETE FROM pay_votes WHERE id = ?', vote.id);
   res.json({ ok: true });
 });
 
@@ -229,6 +329,7 @@ router.get('/', (req, res) => {
   }
   let rows = q.all(`${claimSelect} WHERE ${where.join(' AND ')} ORDER BY pc.updated_at DESC, pc.id DESC LIMIT 1000`, ...params).map((c) => describe(c, req.user));
   if (req.query.view === 'queue') rows = rows.filter((c) => c.can_act);
+  if (req.query.view === 'completed') rows = rows.filter((c) => ['hr_verified', 'paid'].includes(c.status));
   res.json(rows);
 });
 
@@ -239,11 +340,13 @@ router.get('/preview', (req, res) => {
   const { from, to } = req.query;
   if (!isDate(from) || !isDate(to) || from > to) throw badRequest('Choose a valid period');
   const lectures = claimableLectures(req.user.id, from, to);
-  const rate = teachingRate(req.user.faculty_id);
+  const rates = teachingRates(req.user.faculty_id);
   res.json({
     lectures,
     hours: round2(lectures.reduce((t, l) => t + l.hours, 0)),
-    rate,
+    rate: teachingRate(req.user.faculty_id) || null,
+    rates,
+    estimate: round2(lectures.reduce((t, l) => t + l.hours * (rateForLevels(rates, l.levels)?.amount || 0), 0)),
     pending_lectures: pendingLectureCount(req.user.id, from, to),
   });
 });
@@ -302,6 +405,14 @@ router.get('/:id', (req, res) => {
   out.lines = lines;
   out.events = events;
   out.teaching_rate = teachingRate(claim.faculty_id) || null;
+  out.teaching_rates = teachingRates(claim.faculty_id);
+  out.vote = claim.vote_id ? voteRow(q.get('SELECT * FROM pay_votes WHERE id = ?', claim.vote_id)) : null;
+  out.cleared = ['hr_verified', 'paid'].includes(claim.status);
+  if (claim.status !== 'draft') {
+    out.verify_code = formatCode(ensureVerifyCode(claim.id));
+    out.verify_url = `${publicBase(req)}/verify/${out.verify_code}`;
+    out.sign_offs = signOffs(claim);
+  }
   const term = termAt(req.uid, claim.period_start);
   if (term && claim.department_id && ['admin', 'dean', 'hod', 'hr'].includes(req.user.role)) {
     const b = budgetFor(claim.department_id, term.id);
@@ -339,6 +450,44 @@ router.get('/:id/payslip', async (req, res) => {
   const buf = await payslipPdf(university, { ...claim, status_label: STATUS_LABELS[claim.status] }, lines, events);
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${claim.status === 'paid' ? 'payslip' : 'claim'}-${claim.id}-${slugify(claim.lecturer_name)}.pdf"`);
+  res.send(buf);
+});
+
+/**
+ * Funds requisition form for the claim, signed off along the chain: the lecturer (claimant) submits,
+ * the HoD verifies, the Dean as Vote Controller signs off against a vote, and HR gives final approval
+ * and prints it. Before HR's approval it is marked "not yet cleared".
+ */
+router.get('/:id/requisition', async (req, res) => {
+  const claim = loadClaim(req);
+  if (claim.status === 'draft') throw badRequest('Submit the claim first');
+  const lines = q.all('SELECT * FROM pay_claim_lines WHERE claim_id = ? ORDER BY kind, course_unit_code, work_date, start_time, id', claim.id);
+  const signers = signOffs(claim);
+  const code = formatCode(ensureVerifyCode(claim.id));
+  const url = `${publicBase(req)}/verify/${code}`;
+  const statusLabel = STATUS_LABELS[claim.status];
+  const vote = claim.vote_id ? q.get('SELECT * FROM pay_votes WHERE id = ?', claim.vote_id) : null;
+  const lecturer = q.get('SELECT name, title, phone, role, employment_type FROM users WHERE id = ?', claim.lecturer_id);
+  const university = q.get('SELECT * FROM universities WHERE id = ?', req.uid);
+  const amount = `${claim.currency} ${Number(claim.total).toLocaleString('en', { maximumFractionDigits: 2 })}`;
+  // Phones show this text when the code is scanned, even offline; the link opens the live record.
+  const qrText = [
+    `${university.short_name || university.name} funds requisition #${claim.id}`,
+    `Lecturer: ${[lecturer?.title, claim.lecturer_name].filter(Boolean).join(' ')}`,
+    `Amount claimed: ${amount}`,
+    `Approval status: ${statusLabel}`,
+    `Verify: ${url}`,
+  ].join('\n');
+  const buf = await requisitionPdf(university, { ...claim, status_label: statusLabel }, lines, {
+    lecturer,
+    vote,
+    voteBalance: vote ? round2(vote.amount - voteCharged(vote.id, claim.id)) : null,
+    signers,
+    cleared: ['hr_verified', 'paid'].includes(claim.status),
+    verify: { code, url, qrText },
+  });
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="requisition-${claim.id}-${slugify(claim.lecturer_name)}.pdf"`);
   res.send(buf);
 });
 
@@ -411,6 +560,7 @@ router.post('/:id/submit', (req, res) => {
     if (lines.unpriced) throw badRequest('Your Dean has not set the teaching rate for your faculty yet');
     if (!(total > 0)) throw badRequest('The claim total must be more than zero');
     q.run("UPDATE pay_claims SET status = 'submitted', returned_from = NULL, submitted_at = datetime('now'), updated_at = datetime('now') WHERE id = ?", claim.id);
+    ensureVerifyCode(claim.id);
     event(claim.id, req.user.id, claim.status === 'rejected' ? 'resubmitted' : 'submitted', null, req.body.note);
   });
   const fresh = q.get(`${claimSelect} WHERE pc.id = ?`, claim.id);
@@ -430,21 +580,30 @@ router.post('/:id/approve', (req, res) => {
   const note = String(req.body.note || '').trim();
   const reference = String(req.body.payment_reference || '').trim();
   if (stage.next === 'paid' && !reference) throw badRequest('Enter the payment reference (e.g. voucher or transfer number)');
+  // The Dean signs off as Vote Controller and charges the claim to one of the faculty's votes.
+  const vote = stage.actor === 'dean' ? q.get('SELECT * FROM pay_votes WHERE id = ? AND faculty_id = ? AND active = 1', toInt(req.body.vote_id), claim.faculty_id) : null;
+  if (stage.actor === 'dean' && !vote) throw badRequest('Choose the vote this claim is charged to, or create one for the faculty');
+  if (vote) q.run('UPDATE pay_claims SET vote_id = ? WHERE id = ?', vote.id, claim.id);
   q.run(
     `UPDATE pay_claims SET status = ?, updated_at = datetime('now')${stage.next === 'paid' ? ", payment_reference = ?, paid_at = datetime('now')" : ''} WHERE id = ?`,
     ...(stage.next === 'paid' ? [stage.next, reference, claim.id] : [stage.next, claim.id]),
   );
-  event(claim.id, req.user.id, stage.next === 'paid' ? 'paid' : stage.next === 'hr_verified' ? 'verified' : 'approved', STAGE_NAMES[claim.status], [note, reference && `Payment ref. ${reference}`].filter(Boolean).join(' · '));
+  event(claim.id, req.user.id, stage.next === 'paid' ? 'paid' : stage.next === 'hr_verified' ? 'verified' : 'approved', STAGE_NAMES[claim.status], [vote && `Vote ${vote.code}`, note, reference && `Payment ref. ${reference}`].filter(Boolean).join(' · '));
   const fresh = q.get(`${claimSelect} WHERE pc.id = ?`, claim.id);
   const budgetTerm = termAt(req.uid, claim.period_start);
   const budget = budgetTerm && claim.department_id ? budgetFor(claim.department_id, budgetTerm.id) : null;
   if (stage.next === 'paid') {
     notify(claim.lecturer_id, { title: 'Claim paid', body: `${claim.title}: ${claim.currency} ${claim.total.toLocaleString('en')} (ref. ${reference})`, type: 'claim', link: `/claims/${claim.id}` });
   } else {
-    notify(nextActors(fresh, stage.next), { title: stage.next === 'hr_verified' ? 'Verified claim to pay' : 'Part-time claim to approve', body: `${claim.lecturer_name}: ${claim.title}`, type: 'claim', link: `/claims/${claim.id}` });
-    notify(claim.lecturer_id, { title: `Claim ${stage.next === 'hr_verified' ? 'verified by HR' : `approved by the ${STAGE_NAMES[claim.status]}`}`, body: claim.title, type: 'claim', link: `/claims/${claim.id}` });
+    notify(nextActors(fresh, stage.next), { title: stage.next === 'hr_verified' ? 'Cleared claim to pay' : 'Part-time claim to approve', body: `${claim.lecturer_name}: ${claim.title}`, type: 'claim', link: `/claims/${claim.id}` });
+    notify(claim.lecturer_id, { title: `Claim ${stage.next === 'hr_verified' ? 'given final approval by HR' : stage.actor === 'dean' ? 'signed off by the Dean' : 'verified by your HoD'}`, body: claim.title, type: 'claim', link: `/claims/${claim.id}` });
   }
-  res.json({ ...describe(fresh, req.user), budget_warning: budget?.amount != null && budget.remaining < 0 ? `The department is ${fresh.currency} ${Math.abs(budget.remaining).toLocaleString('en')} over its part-time budget for ${budgetTerm.name}` : null });
+  const voteLeft = vote ? round2(vote.amount - voteCharged(vote.id)) : null;
+  res.json({
+    ...describe(fresh, req.user),
+    budget_warning: budget?.amount != null && budget.remaining < 0 ? `The department is ${fresh.currency} ${Math.abs(budget.remaining).toLocaleString('en')} over its part-time budget for ${budgetTerm.name}` : null,
+    vote_warning: voteLeft !== null && voteLeft < 0 ? `Vote ${vote.code} is now ${fresh.currency} ${Math.abs(voteLeft).toLocaleString('en')} overdrawn` : null,
+  });
 });
 
 router.post('/:id/reject', (req, res) => {

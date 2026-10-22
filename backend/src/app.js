@@ -21,6 +21,7 @@ import reportRoutes from './routes/reports.js';
 import dashboardRoutes from './routes/dashboard.js';
 import claimRoutes from './routes/claims.js';
 import calendarRoutes from './routes/calendar.js';
+import verifyRoutes from './routes/verify.js';
 import checkinRoutes from './routes/checkin.js';
 import examRoutes from './routes/exams.js';
 import opsRoutes from './routes/ops.js';
@@ -92,6 +93,8 @@ export function createApp({ basePath = config.basePath } = {}) {
   app.use('/api/platform', authenticate, platformRoutes);
   // Calendar feeds are opened by calendar apps, so they use a secret link instead of a sign-in.
   app.use('/api/calendar', calendarRoutes);
+  // Printed requisition forms are checked by anyone holding them, so this needs no sign-in.
+  app.use('/api/verify', verifyRoutes);
 
   const tenant = express.Router();
   tenant.use(authenticate, requireTenant);

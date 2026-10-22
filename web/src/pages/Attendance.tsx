@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, Check, CheckCheck, CircleCheck, CircleX, ClipboardList, MessageSquareWarning, QrCode, Search, X } from 'lucide-react';
-import { api } from '../api';
+import { ArrowLeft, Check, CheckCheck, CircleCheck, CircleX, ClipboardList, Download, FileSpreadsheet, FileText, MessageSquareWarning, QrCode, Search, X } from 'lucide-react';
+import { api, download } from '../api';
 import { useAuth } from '../auth';
 import { useFeedback } from '../components/feedback';
 import { SessionRow } from '../components/WeekGrid';
@@ -151,6 +151,75 @@ function RegisterSheet({ item, date, onClose, onSaved }: { item: any; date: stri
 }
 
 /** Lecturer (or manager) review of a submitted register. */
+/** PDF and Excel buttons for a file the API builds. */
+function DownloadButtons({ path, name, size = 'sm' }: { path: string; name: string; size?: 'sm' | 'md' }) {
+  const { fail } = useFeedback();
+  const [busy, setBusy] = useState<string | null>(null);
+  const get = async (format: 'pdf' | 'xlsx') => {
+    setBusy(format);
+    try {
+      await download(`${path}${path.includes('?') ? '&' : '?'}format=${format}`, `${name}.${format}`);
+    } catch (err) {
+      fail(err);
+    } finally {
+      setBusy(null);
+    }
+  };
+  return (
+    <div className="row gap-sm">
+      <Button size={size} variant="secondary" icon={<FileText size={14} />} loading={busy === 'pdf'} onClick={() => get('pdf')}>
+        PDF
+      </Button>
+      <Button size={size} variant="secondary" icon={<FileSpreadsheet size={14} />} loading={busy === 'xlsx'} onClick={() => get('xlsx')}>
+        Excel
+      </Button>
+    </div>
+  );
+}
+
+/** Term attendance sheet: pick a course unit and class, get every lecture with P / A and each student's percentage. */
+function DownloadSheet({ onClose }: { onClose: () => void }) {
+  const { data, loading, error } = useFetch<any>('/api/attendance/sheets');
+  const [allocationId, setAllocationId] = useState<string>('');
+  const [classId, setClassId] = useState<string>('');
+  const items: any[] = data?.items || [];
+  const item = items.find((i) => String(i.allocation_id) === allocationId) || items[0];
+  const cls = item?.classes.find((c: any) => String(c.id) === classId) || item?.classes[0];
+  return (
+    <Modal open onClose={onClose} title="Download attendance" footer={<Button variant="secondary" onClick={onClose}>Close</Button>}>
+      <ErrorNote error={error} />
+      {loading && <Spinner />}
+      {data && !items.length && <p className="muted m0">No course units to download for {data.term?.name || 'this term'}.</p>}
+      {item && (
+        <div className="stack">
+          <p className="muted m0">
+            One sheet per class for {data.term?.name}: every lecture with approved attendance, P or A for each student, and their percentage. Students below the exam requirement are highlighted.
+          </p>
+          <Field label="Course unit">
+            <Select
+              value={String(item.allocation_id)}
+              onChange={(e) => {
+                setAllocationId(e.target.value);
+                setClassId('');
+              }}
+              options={items.map((i) => ({ value: String(i.allocation_id), label: `${i.course_code} ${i.course_name} (${i.lecturer_name})` }))}
+            />
+          </Field>
+          {item.classes.length > 1 && (
+            <Field label="Class">
+              <Select value={String(cls.id)} onChange={(e) => setClassId(e.target.value)} options={item.classes.map((c: any) => ({ value: String(c.id), label: c.name }))} />
+            </Field>
+          )}
+          <div className="row between wrap gap-sm">
+            <span className="muted small">{item.registers ? `${item.registers} approved registers` : 'No approved registers yet'}</span>
+            <DownloadButtons size="md" path={`/api/attendance/sheets/export?allocation_id=${item.allocation_id}&class_id=${cls.id}`} name={`attendance-${item.course_code}-${cls.name}`.replace(/\s+/g, '-')} />
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 export function RegisterReview({ id, onDone, onClose }: { id: number; onDone?: () => void; onClose?: () => void }) {
   const { toast, fail } = useFeedback();
   const { data, loading, error, reload } = useFetch<any>(`/api/attendance/registers/${id}`);
@@ -192,7 +261,10 @@ export function RegisterReview({ id, onDone, onClose }: { id: number; onDone?: (
             Submitted by {data.submitted_by_name || '-'} {data.topic ? `· Topic: ${data.topic}` : ''} {data.note ? `· Note: ${data.note}` : ''} {data.source === 'qr' ? `· QR check-in: ${data.self_checkins} scanned by phone` : ''}
           </div>
         </div>
-        <StatusBadge status={data.status} />
+        <div className="row gap-sm wrap">
+          <StatusBadge status={data.status} />
+          <DownloadButtons path={`/api/attendance/registers/${id}/export`} name={`attendance-${data.course_code}-${data.class_name}-${data.lecture_date}`.replace(/\s+/g, '-')} />
+        </div>
       </div>
       <div className="stat-grid compact">
         <StatCard label="Present" value={present.length} tone="success" />
@@ -520,6 +592,7 @@ export default function Attendance() {
     ...(user!.role === 'student' ? [{ value: 'mine', label: 'My attendance' }] : []),
   ];
   const tab = tabs.some((t) => t.value === params.get('tab')) ? params.get('tab')! : tabs[0]?.value;
+  const [sheet, setSheet] = useState(false);
 
   return (
     <>
@@ -534,7 +607,15 @@ export default function Attendance() {
                 ? 'Your attendance history across all course units.'
                 : 'Attendance registers across your unit.'
         }
+        actions={
+          (teaches || manages || isRep) && (
+            <Button variant="secondary" icon={<Download size={16} />} onClick={() => setSheet(true)}>
+              Download attendance
+            </Button>
+          )
+        }
       />
+      {sheet && <DownloadSheet onClose={() => setSheet(false)} />}
       {tabs.length > 1 && <Tabs value={tab} onChange={(v) => setParams({ tab: v })} tabs={tabs} />}
       <div className="stack">
         {tab === 'take' && <SessionsForDate role="rep" />}

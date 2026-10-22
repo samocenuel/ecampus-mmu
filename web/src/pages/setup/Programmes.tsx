@@ -8,7 +8,7 @@ import { ResourcePage } from '../../components/ResourcePage';
 import { Badge, Button, Card, EmptyState, ErrorNote, Field, IconButton, Modal, PageHeader, Select, Spinner } from '../../components/ui';
 import { useFetch } from '../../hooks';
 
-export const LEVELS = ['Certificate', 'Diploma', 'Bachelor', 'Postgraduate Diploma', 'Masters', 'PhD'];
+export const LEVELS = ['Short course', 'Certificate', 'Diploma', 'Bachelor', 'Postgraduate Diploma', 'Masters', 'PhD'];
 
 export function Programmes() {
   const { hasRole } = useAuth();

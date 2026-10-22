@@ -97,6 +97,7 @@ export default function Login() {
   const [busy, setBusy] = useState(false);
   const [demoRoles, setDemoRoles] = useState<DemoRole[]>([]);
   const [picker, setPicker] = useState(false);
+  const [forgot, setForgot] = useState(false);
 
   useEffect(() => {
     api<{ available: boolean; roles: DemoRole[] }>('/api/auth/demo')
@@ -139,6 +140,11 @@ export default function Login() {
           <Button type="submit" loading={busy} icon={<LogIn size={16} />} className="block">
             Sign in
           </Button>
+          <p className="center small m0">
+            <button type="button" className="link" onClick={() => setForgot(true)}>
+              Forgot your password?
+            </button>
+          </p>
           <p className="center muted small">
             New institution? <Link to="/register">Create your university</Link>
           </p>
@@ -155,6 +161,11 @@ export default function Login() {
         </form>
       </main>
       <DemoPicker open={picker} roles={demoRoles} onClose={() => setPicker(false)} />
+      <Modal open={forgot} onClose={() => setForgot(false)} title="Forgot your password?" footer={<Button onClick={() => setForgot(false)}>OK</Button>}>
+        <p className="m0">Ask your university administrator, Dean or Head of Department to reset it. In eCampus they open <strong>Users</strong>, find your account and choose <strong>Reset password</strong>.</p>
+        <p>They give you a temporary password; sign in with it and you will be asked to choose a new one.</p>
+        <p className="muted small m0">University administrators who are locked out can ask the eCampus platform team to reset their account.</p>
+      </Modal>
     </div>
   );
 }

@@ -27,7 +27,7 @@ function wipe() {
   for (const t of [
     'pay_budgets', 'exam_overrides', 'coursework_marks', 'exam_invigilators', 'exam_rooms', 'exams', 'leave_covers', 'leave_requests',
     'calendar_events', 'session_changes', 'attendance_corrections', 'checkin_flags', 'checkins', 'checkin_sessions', 'student_devices',
-    'pay_claim_events', 'pay_claim_lines', 'pay_claims', 'pay_rates',
+    'pay_claim_events', 'pay_claim_lines', 'pay_claims', 'pay_votes', 'pay_rates',
     'notifications', 'notification_prefs', 'attendance_records', 'attendance_registers', 'timetable_sessions',
     'allocation_classes', 'allocations', 'program_course_units', 'course_units', 'classes', 'programs',
     'departments', 'faculties', 'rooms', 'academic_terms', 'users', 'universities',
@@ -278,7 +278,8 @@ export function seedDemo({ quiet = false, ownerPassword = DEMO_PASSWORD } = {}) 
     }
 
     seedPay({ uni, today: now.date, hrId, deans: structure.map((f) => lecturer[f.dean[1]]), lecturer });
-    log('Part-time pay: rates and sample claims');
+    seedVotes(uni);
+    log('Part-time pay: rates, votes and sample claims');
     seedOps({ uni, today: now.date, historyEnd: now.date });
     log('Calendar, changes, leave, exams, coursework and check-ins');
     return { university_id: uni, term_id: term1 };
@@ -315,12 +316,48 @@ export function upgradeDemo({ quiet = false } = {}) {
     changed = true;
     if (!quiet) console.log('Demo upgraded with part-time pay');
   }
+  if (q.get("SELECT 1 FROM pay_rates WHERE university_id = ? AND kind = 'teaching'", uni.id) && !q.get('SELECT 1 FROM pay_rates WHERE university_id = ? AND program_level IS NOT NULL', uni.id)) {
+    tx(() => seedLevelRates(uni.id));
+    changed = true;
+    if (!quiet) console.log('Demo upgraded with teaching rates by programme level');
+  }
+  if (q.get('SELECT 1 FROM pay_claims WHERE university_id = ?', uni.id) && !q.get('SELECT 1 FROM pay_votes WHERE university_id = ?', uni.id)) {
+    tx(() => seedVotes(uni.id));
+    changed = true;
+    if (!quiet) console.log('Demo upgraded with votes for part-time pay');
+  }
   if (!q.get('SELECT 1 FROM calendar_events WHERE university_id = ?', uni.id)) {
     tx(() => seedOps({ uni: uni.id, today: zonedNow(TZ).date, historyEnd: last || zonedNow(TZ).date }));
     changed = true;
     if (!quiet) console.log('Demo upgraded with calendar, leave, exams and check-ins');
   }
   return changed;
+}
+
+/** One part-time pay vote per faculty; claims the Dean has signed off are charged to it. */
+function seedVotes(uni) {
+  const year = zonedNow(TZ).date.slice(0, 4);
+  const fy = Number(zonedNow(TZ).date.slice(5, 7)) >= 7 ? `${year}/${Number(year) + 1}` : `${Number(year) - 1}/${year}`;
+  for (const f of q.all('SELECT id, code, name, dean_id FROM faculties WHERE university_id = ?', uni)) {
+    const id = insert('pay_votes', {
+      university_id: uni, faculty_id: f.id, code: `${f.code}-PT-221001`, name: `Part-time lecturers, ${f.name}`,
+      amount: f.code === 'FST' ? 6000000 : 4000000, financial_year: fy, created_by: f.dean_id,
+    });
+    q.run("UPDATE pay_claims SET vote_id = ? WHERE faculty_id = ? AND vote_id IS NULL AND status IN ('dean_approved', 'hr_verified', 'paid')", id, f.id);
+  }
+}
+
+/** Teaching paid differently by programme level, next to the general rate (used for Bachelor's). */
+function seedLevelRates(uni) {
+  for (const f of q.all("SELECT f.id, f.code, f.dean_id FROM faculties f WHERE f.university_id = ? AND EXISTS (SELECT 1 FROM pay_rates r WHERE r.faculty_id = f.id AND r.kind = 'teaching')", uni)) {
+    const base = f.code === 'FST' ? 50000 : 45000;
+    for (const [level, factor] of [['Short course', 0.6], ['Diploma', 0.7], ['Masters', 1.6], ['PhD', 2]]) {
+      insert('pay_rates', {
+        university_id: uni, faculty_id: f.id, kind: 'teaching', name: `Teaching: ${level}`, unit: 'hour', amount: Math.round((base * factor) / 1000) * 1000,
+        program_level: level, description: `Per contact hour for ${level} programmes`, updated_by: f.dean_id,
+      });
+    }
+  }
 }
 
 const periodTitle = (from, to) => {
@@ -340,6 +377,7 @@ function seedPay({ uni, today, hrId, deans, lecturer }) {
       ['task', 'Invigilation', 'hour', 15000, null],
     ]) insert('pay_rates', { university_id: uni, faculty_id: f.id, kind, name, unit, amount, description, updated_by: f.dean_id });
   }
+  seedLevelRates(uni);
   for (const name of ['Esther Atim', 'Linda Auma', 'Joan Akello']) q.run("UPDATE users SET employment_type = 'part_time' WHERE id = ?", lecturer[name]);
 
   const ev = (claimId, actorId, action, stage, note, when) =>

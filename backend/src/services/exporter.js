@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import ExcelJS from 'exceljs';
 import PDFDocument from 'pdfkit';
+import QRCode from 'qrcode';
 import { config } from '../config.js';
 import { DAY_NAMES, toHHMM, toMinutes, zonedNow } from '../util.js';
 
@@ -539,6 +540,562 @@ export function payslipPdf(university, claim, lines, events) {
       for (const e of events) {
         doc.text(`${localStamp(university, e.created_at)}  ${e.action}${e.stage ? ` (${e.stage})` : ''} by ${e.actor_name || '-'}${e.note ? ` - ${e.note}` : ''}`, left, y, { width });
         y = doc.y + 4;
+      }
+      doc.end();
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+const METHOD_TEXT = { qr: 'Phone', manual: 'Manual', rep: 'Class rep', correction: 'Correction' };
+const shortDate = (d) => `${d.slice(8, 10)}/${d.slice(5, 7)}`;
+const pct = (a, t) => (t ? Math.round((a / t) * 1000) / 10 : null);
+
+function styleHead(row, primary) {
+  row.eachCell((cell) => {
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: `FF${primary}` } };
+    cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+  });
+}
+
+/** One lecture's attendance list for one class. */
+export async function registerXlsx(university, reg, students) {
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet('Attendance');
+  const primary = hex(university.primary_color);
+  ws.addRow([university.name]).font = { bold: true, size: 14, color: { argb: `FF${primary}` } };
+  ws.addRow([`Attendance: ${reg.course_code} ${reg.course_name}`]).font = { bold: true, size: 12 };
+  ws.addRow([`${reg.class_name} · ${reg.lecture_date} ${reg.start_time}-${reg.end_time} · ${reg.room_name} · ${reg.lecturer_name}`]);
+  const present = students.filter((s) => s.present).length;
+  ws.addRow([`${present} of ${students.length} present · register ${reg.status}${reg.reviewed_by_name ? ` (${reg.reviewed_by_name})` : ''}${reg.topic ? ` · Topic: ${reg.topic}` : ''}`]);
+  ws.addRow([]);
+  styleHead(ws.addRow(['No.', 'Reg. No', 'Name', 'Attendance', 'How']), primary);
+  [6, 18, 32, 13, 13].forEach((w, i) => {
+    ws.getColumn(i + 1).width = w;
+  });
+  students.forEach((s, i) => {
+    const row = ws.addRow([i + 1, s.identifier || '', s.name, s.present ? 'Present' : 'Absent', s.present ? METHOD_TEXT[s.method] || '' : '']);
+    row.getCell(4).font = { color: { argb: s.present ? 'FF067647' : 'FFB42318' }, bold: true };
+  });
+  ws.views = [{ state: 'frozen', ySplit: 6 }];
+  return Buffer.from(await wb.xlsx.writeBuffer());
+}
+
+export function registerPdf(university, reg, students) {
+  const primary = `#${hex(university.primary_color)}`;
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: 'A4', margin: 40, bufferPages: true });
+    const chunks = [];
+    doc.on('data', (c) => chunks.push(c));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+    try {
+      let y = pdfHeader(doc, university, `Attendance: ${reg.course_code} ${reg.course_name}`, `${reg.class_name} · ${reg.lecture_date} ${reg.start_time}-${reg.end_time}`);
+      const left = doc.page.margins.left;
+      const width = doc.page.width - left - doc.page.margins.right;
+      const present = students.filter((s) => s.present).length;
+      const taken = reg.source === 'qr' ? ' (QR check-in)' : reg.submitted_by_name ? `, taken by ${reg.submitted_by_name}` : '';
+      const info = [
+        ['Lecturer', reg.lecturer_name],
+        ['Room', reg.room_name],
+        ['Students present', `${present} of ${students.length}`],
+        ['Register', `${reg.status}${reg.reviewed_by_name ? ` by ${reg.reviewed_by_name}` : ''}${taken}`],
+        ...(reg.topic ? [['Topic', reg.topic]] : []),
+      ];
+      doc.font('Helvetica').fontSize(9.5);
+      for (const [k, v] of info) {
+        doc.fillColor('#667085').text(k, left, y, { width: 110 });
+        doc.fillColor('#101828').text(String(v ?? '-'), left + 110, y, { width: width - 110 });
+        y += 15;
+      }
+      y += 8;
+      const cols = [['No.', 32], ['Reg. No', 110], ['Name', width - 32 - 110 - 80 - 80], ['Attendance', 80], ['How', 80]];
+      const head = () => {
+        doc.rect(left, y, width, 18).fill(primary);
+        doc.font('Helvetica-Bold').fontSize(9).fillColor('#FFFFFF');
+        let x = left;
+        for (const [h, w] of cols) {
+          doc.text(h, x + 4, y + 5, { width: w - 8, lineBreak: false });
+          x += w;
+        }
+        y += 20;
+      };
+      head();
+      students.forEach((s, i) => {
+        if (y + 16 > doc.page.height - 70) {
+          doc.addPage();
+          y = doc.page.margins.top;
+          head();
+        }
+        if (i % 2) doc.rect(left, y - 2, width, 16).fill('#F9FAFB');
+        const cells = [String(i + 1), s.identifier || '', s.name, s.present ? 'Present' : 'Absent', s.present ? METHOD_TEXT[s.method] || '' : ''];
+        let x = left;
+        cells.forEach((c, ci) => {
+          doc.font(ci === 3 ? 'Helvetica-Bold' : 'Helvetica').fontSize(9).fillColor(ci === 3 ? (s.present ? '#067647' : '#B42318') : '#101828');
+          doc.text(c, x + 4, y + 2, { width: cols[ci][1] - 8, lineBreak: false, ellipsis: true });
+          x += cols[ci][1];
+        });
+        y += 16;
+      });
+      y += 30;
+      if (y > doc.page.height - 60) {
+        doc.addPage();
+        y = doc.page.margins.top;
+      }
+      doc.font('Helvetica').fontSize(9).fillColor('#344054');
+      doc.text(
+        reg.status === 'approved' && reg.reviewed_at
+          ? `Approved in eCampus by ${reg.reviewed_by_name || 'the lecturer'} on ${localStamp(university, reg.reviewed_at)}.`
+          : `Not yet approved: ${reg.status}.`,
+        left,
+        y,
+        { width },
+      );
+      doc.end();
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+/**
+ * A course unit's attendance for one class over the term: one column per lecture (P / A),
+ * then lectures attended, total and percentage. `lectures` are approved registers in date order;
+ * `students[i].marks` maps register id to 1 (present) or 0.
+ */
+export async function attendanceSheetXlsx(university, meta, lectures, students) {
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet('Attendance', { pageSetup: { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0, paperSize: 9 } });
+  const primary = hex(university.primary_color);
+  const threshold = Number(university.exam_min_attendance ?? 75);
+  ws.addRow([university.name]).font = { bold: true, size: 14, color: { argb: `FF${primary}` } };
+  ws.addRow([`Attendance: ${meta.course_code} ${meta.course_name} · ${meta.class_name}`]).font = { bold: true, size: 12 };
+  ws.addRow([`${meta.term_name || ''} · Lecturer: ${meta.lecturer_name} · ${lectures.length} lectures with approved attendance · P = present, A = absent`]);
+  ws.addRow([]);
+  const head = ws.addRow(['No.', 'Reg. No', 'Name', ...lectures.map((l) => `${shortDate(l.lecture_date)}\n${l.start_time}`), 'Attended', 'Lectures', '%']);
+  styleHead(head, primary);
+  head.height = 30;
+  ws.getColumn(1).width = 6;
+  ws.getColumn(2).width = 18;
+  ws.getColumn(3).width = 30;
+  lectures.forEach((_, i) => {
+    ws.getColumn(4 + i).width = 7;
+  });
+  const end = 4 + lectures.length;
+  ws.getColumn(end).width = 10;
+  ws.getColumn(end + 1).width = 10;
+  ws.getColumn(end + 2).width = 8;
+  students.forEach((s, i) => {
+    const marks = lectures.map((l) => (s.marks.get(l.id) === undefined ? '' : s.marks.get(l.id) ? 'P' : 'A'));
+    const attended = marks.filter((m) => m === 'P').length;
+    const total = marks.filter((m) => m).length;
+    const rate = pct(attended, total);
+    const row = ws.addRow([i + 1, s.identifier || '', s.name, ...marks, attended, total, rate ?? '']);
+    marks.forEach((m, mi) => {
+      const cell = row.getCell(4 + mi);
+      cell.alignment = { horizontal: 'center' };
+      if (m === 'A') cell.font = { color: { argb: 'FFB42318' }, bold: true };
+    });
+    const rc = row.getCell(end + 2);
+    if (rate !== null && rate < threshold) {
+      rc.font = { color: { argb: 'FFB42318' }, bold: true };
+      rc.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEE4E2' } };
+    }
+  });
+  ws.views = [{ state: 'frozen', ySplit: 5, xSplit: 3 }];
+  ws.addRow([]);
+  ws.addRow([`Students below ${threshold}% are highlighted (exam attendance requirement).`]).font = { italic: true, size: 9, color: { argb: 'FF666666' } };
+  return Buffer.from(await wb.xlsx.writeBuffer());
+}
+
+export function attendanceSheetPdf(university, meta, lectures, students) {
+  const primary = `#${hex(university.primary_color)}`;
+  const threshold = Number(university.exam_min_attendance ?? 75);
+  const PER_PAGE = 20;
+  const parts = [];
+  for (let i = 0; i < Math.max(lectures.length, 1); i += PER_PAGE) parts.push(lectures.slice(i, i + PER_PAGE));
+  return pdfToBuffer((doc) => {
+    parts.forEach((part, pi) => {
+      if (pi) doc.addPage();
+      const title = `Attendance: ${meta.course_code} ${meta.course_name} · ${meta.class_name}`;
+      const range = parts.length > 1 ? ` · lectures ${pi * PER_PAGE + 1}-${pi * PER_PAGE + part.length}` : '';
+      const subtitle = `${meta.term_name || ''} · ${meta.lecturer_name} · ${lectures.length} lectures${range} · P present, A absent`;
+      let y = pdfHeader(doc, university, title, subtitle);
+      const left = doc.page.margins.left;
+      const fixed = [['No.', 22], ['Reg. No', 78], ['Name', 130]];
+      const dateW = 24;
+      const tail = [['Att.', 34], ['Of', 30], ['%', 36]];
+      const rowW = fixed.reduce((t, [, w]) => t + w, 0) + part.length * dateW + tail.reduce((t, [, w]) => t + w, 0);
+      const drawHead = () => {
+        let x = left;
+        doc.rect(left, y, rowW, 24).fill(primary);
+        doc.font('Helvetica-Bold').fontSize(7.5).fillColor('#FFFFFF');
+        for (const [h, w] of fixed) {
+          doc.text(h, x + 3, y + 8, { width: w - 6, lineBreak: false });
+          x += w;
+        }
+        for (const l of part) {
+          doc.font('Helvetica-Bold').text(shortDate(l.lecture_date), x, y + 4, { width: dateW, align: 'center', lineBreak: false });
+          doc.font('Helvetica').text(l.start_time, x, y + 13, { width: dateW, align: 'center', lineBreak: false });
+          x += dateW;
+        }
+        doc.font('Helvetica-Bold');
+        for (const [h, w] of tail) {
+          doc.text(h, x, y + 8, { width: w, align: 'center', lineBreak: false });
+          x += w;
+        }
+        y += 26;
+      };
+      drawHead();
+      students.forEach((s, i) => {
+        if (y + 14 > doc.page.height - doc.page.margins.bottom - 14) {
+          doc.addPage();
+          y = doc.page.margins.top;
+          drawHead();
+        }
+        const all = lectures.map((l) => s.marks.get(l.id)).filter((m) => m !== undefined);
+        const attended = all.filter(Boolean).length;
+        const rate = pct(attended, all.length);
+        if (i % 2) doc.rect(left, y - 2, rowW, 14).fill('#F9FAFB');
+        let x = left;
+        doc.font('Helvetica').fontSize(7.5).fillColor('#101828');
+        [String(i + 1), s.identifier || '', s.name].forEach((c, ci) => {
+          doc.text(c, x + 3, y + 1, { width: fixed[ci][1] - 6, lineBreak: false, ellipsis: true });
+          x += fixed[ci][1];
+        });
+        for (const l of part) {
+          const m = s.marks.get(l.id);
+          doc.font('Helvetica-Bold').fillColor(m === undefined ? '#98A2B3' : m ? '#067647' : '#B42318');
+          doc.text(m === undefined ? '-' : m ? 'P' : 'A', x, y + 1, { width: dateW, align: 'center', lineBreak: false });
+          x += dateW;
+        }
+        doc.font('Helvetica').fillColor('#101828');
+        [String(attended), String(all.length)].forEach((c, ci) => {
+          doc.text(c, x, y + 1, { width: tail[ci][1], align: 'center', lineBreak: false });
+          x += tail[ci][1];
+        });
+        const low = rate !== null && rate < threshold;
+        doc.font('Helvetica-Bold').fillColor(low ? '#B42318' : '#101828').text(rate === null ? '-' : `${rate}%`, x, y + 1, { width: tail[2][1], align: 'center', lineBreak: false });
+        y += 14;
+      });
+      doc.font('Helvetica-Oblique').fontSize(7.5).fillColor('#667085').text(`Percentages in red are below the ${threshold}% needed to sit exams.`, left, y + 8, { lineBreak: false });
+    });
+  });
+}
+
+// ---------------------------------------------------------------- Funds requisition
+
+const ONES = ['', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen'];
+const TENS = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety'];
+const CURRENCY_WORDS = { UGX: 'Uganda Shillings', KES: 'Kenya Shillings', TZS: 'Tanzania Shillings', RWF: 'Rwanda Francs', USD: 'US Dollars', EUR: 'Euros', GBP: 'Pounds Sterling' };
+
+function hundreds(n) {
+  const h = Math.floor(n / 100);
+  const r = n % 100;
+  const rest = r < 20 ? ONES[r] : `${TENS[Math.floor(r / 10)]}${r % 10 ? `-${ONES[r % 10]}` : ''}`;
+  return [h ? `${ONES[h]} hundred` : '', rest].filter(Boolean).join(' and ');
+}
+
+function numberWords(n) {
+  if (n === 0) return 'zero';
+  const scales = ['', 'thousand', 'million', 'billion', 'trillion'];
+  const parts = [];
+  for (let i = 0; n > 0; i++, n = Math.floor(n / 1000)) {
+    const c = n % 1000;
+    if (c) parts.unshift({ c, text: `${hundreds(c)}${scales[i] ? ` ${scales[i]}` : ''}` });
+  }
+  // British style: "one million and fifty".
+  return parts.map((p, i) => (i && i === parts.length - 1 && p.c < 100 ? `and ${p.text}` : p.text)).join(' ');
+}
+
+/** "Two hundred and forty thousand Uganda Shillings only". */
+export function amountInWords(amount, currency = 'UGX') {
+  const whole = Math.floor(Math.abs(amount || 0));
+  const cents = Math.round((Math.abs(amount || 0) - whole) * 100);
+  const text = `${numberWords(whole)} ${CURRENCY_WORDS[currency] || currency}${cents ? ` and ${numberWords(cents)} cents` : ''} only`;
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/** A QR code drawn as vector squares (sharp when printed), with a one-module quiet zone. */
+function drawQr(doc, text, x, y, size) {
+  const qr = QRCode.create(text, { errorCorrectionLevel: 'L' });
+  const n = qr.modules.size;
+  const cell = size / (n + 2);
+  doc.save();
+  doc.rect(x, y, size, size).fill('#FFFFFF');
+  for (let r = 0; r < n; r++) {
+    for (let c = 0; c < n; c++) if (qr.modules.get(r, c)) doc.rect(x + (c + 1) * cell, y + (r + 1) * cell, cell + 0.15, cell + 0.15);
+  }
+  doc.fill('#000000');
+  doc.restore();
+}
+const dmy = (d) => (d ? `${d.slice(8, 10)}/${d.slice(5, 7)}/${d.slice(0, 4)}` : '');
+
+/**
+ * The funds requisition form for a part-time pay claim, in the layout of a university requisition:
+ * letterhead with a verification QR code, claimant and vote, the items claimed, the amount in words,
+ * and the sign-offs (claimant, HoD, Dean as Vote Controller, HR final approval) as digital
+ * footprints, followed by blank finance blocks and a schedule of every lecture and task.
+ */
+export function requisitionPdf(university, claim, lines, { lecturer, vote, voteBalance, signers, cleared, verify }) {
+  const primary = `#${hex(university.primary_color)}`;
+  const money = (n) => `${claim.currency} ${Number(n || 0).toLocaleString('en', { maximumFractionDigits: 2 })}`;
+  const stampOf = (s) => {
+    if (!s?.at) return '';
+    const t = localStamp(university, s.at);
+    return `${dmy(t.slice(0, 10))} ${t.slice(11)}`;
+  };
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: 'A4', margin: 40, bufferPages: true });
+    const chunks = [];
+    doc.on('data', (c) => chunks.push(c));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+    try {
+      const left = doc.page.margins.left;
+      const width = doc.page.width - left - doc.page.margins.right;
+      const bottom = () => doc.page.height - doc.page.margins.bottom;
+      let y = doc.page.margins.top;
+      const ensure = (h) => {
+        if (y + h > bottom()) {
+          doc.addPage();
+          y = doc.page.margins.top;
+        }
+      };
+
+      // Letterhead: logo and address on the left, web, email and date on the right.
+      const logo = logoFile(university);
+      let x = left;
+      if (logo) {
+        try {
+          doc.image(logo, left, y, { fit: [64, 64] });
+          x += 74;
+        } catch {
+          /* unreadable logo */
+        }
+      }
+      const qrSize = 84;
+      const leftW = width * 0.5 - (x - left);
+      doc.font('Helvetica-Bold').fontSize(13).fillColor(primary).text(university.name, x, y, { width: leftW });
+      const address = String(university.address || '').split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+      doc.font('Helvetica').fontSize(9).fillColor('#344054');
+      for (const line of [...address, university.phone ? `Tel. ${university.phone}` : null].filter(Boolean)) doc.text(line, x, doc.y, { width: leftW });
+      const leftEnd = Math.max(doc.y, y + 64);
+      const rx = left + width * 0.5;
+      const rw = width * 0.5 - qrSize - 10;
+      drawQr(doc, verify.qrText, left + width - qrSize, y - 4, qrSize);
+      doc.font('Helvetica').fontSize(6.5).fillColor('#667085').text(`Scan to verify · ${verify.code}`, left + width - qrSize - 10, y + qrSize - 2, { width: qrSize + 10, align: 'center', lineBreak: false });
+      doc.font('Helvetica').fontSize(9).fillColor('#344054');
+      let ry = y + 4;
+      for (const [k, v] of [['Web Site', university.website], ['Email', university.email], ['Date', dmy(cleared ? signers.hr?.at : null) || dmy(new Date().toISOString())]]) {
+        if (!v) continue;
+        doc.font('Helvetica-Bold').text(`${k}:`, rx, ry, { width: 52, continued: false });
+        doc.font('Helvetica').text(v, rx + 54, ry, { width: rw - 54 });
+        ry = doc.y + 3;
+      }
+      y = Math.max(leftEnd, ry, y + qrSize + 8) + 6;
+      doc.moveTo(left, y).lineTo(left + width, y).lineWidth(1.5).strokeColor(primary).stroke();
+      y += 12;
+
+      if (!cleared) {
+        doc.save();
+        doc.rotate(-32, { origin: [doc.page.width / 2, doc.page.height / 2] });
+        doc.font('Helvetica-Bold').fontSize(64).fillColor('#D92D20').fillOpacity(0.08);
+        doc.text('NOT YET CLEARED', 0, doc.page.height / 2 - 40, { width: doc.page.width, align: 'center' });
+        doc.restore();
+        doc.fillOpacity(1);
+      }
+      doc.font('Helvetica-Bold').fontSize(14).fillColor('#101828').text('Funds Requisition Form', left, y, { width, align: 'center', underline: true });
+      y = doc.y + 4;
+      doc.font('Helvetica').fontSize(8.5).fillColor(cleared ? '#067647' : '#B42318').text(cleared ? `Cleared for payment · claim #${claim.id}` : `Not yet cleared: ${claim.status_label} · claim #${claim.id}`, left, y, { width, align: 'center' });
+      y = doc.y + 12;
+
+      // Claimant and vote, as label / value pairs on a ruled line.
+      const field = (label, value, fx, fw) => {
+        doc.font('Helvetica').fontSize(9.5).fillColor('#475467').text(label, fx, y, { width: 82, lineBreak: false });
+        doc.font('Helvetica-Bold').fillColor('#101828').text(String(value || ''), fx + 84, y, { width: fw - 88, height: 13, ellipsis: true });
+        doc.moveTo(fx + 84, y + 12).lineTo(fx + fw - 6, y + 12).lineWidth(0.5).strokeColor('#98A2B3').dash(1, { space: 1.5 }).stroke().undash();
+      };
+      const half = width / 2;
+      const designation = lecturer?.employment_type === 'part_time' ? 'Part-time Lecturer' : 'Lecturer';
+      field('Name', [lecturer?.title, claim.lecturer_name].filter(Boolean).join(' '), left, half);
+      field('Designation', designation, left + half, half);
+      y += 18;
+      field('Phone No', lecturer?.phone || '', left, half);
+      field('Department', claim.department_name, left + half, half);
+      y += 18;
+      const purpose = `Payment for part-time teaching and related tasks: ${claim.title} (${dmy(claim.period_start)} to ${dmy(claim.period_end)}), ${claim.faculty_name || ''}`;
+      doc.font('Helvetica').fontSize(9.5).fillColor('#475467').text('Purpose', left, y, { width: 82 });
+      doc.font('Helvetica-Bold').fillColor('#101828').text(purpose, left + 84, y, { width: width - 88 });
+      y = doc.y + 6;
+      field('Vote', vote ? `${vote.code} - ${vote.name}${vote.financial_year ? ` (${vote.financial_year})` : ''}` : 'Not yet assigned (Dean)', left, width);
+      y += 18;
+      field('Balance on Vote', vote ? `${money(voteBalance)} before this claim · ${money(voteBalance - claim.total)} after` : '', left, width);
+      y += 22;
+
+      // Items: teaching grouped per course unit and rate; tasks one per line.
+      const items = [];
+      const groups = new Map();
+      for (const l of lines.filter((l) => l.kind === 'teaching')) {
+        const key = `${l.course_unit_code}|${l.unit_price}`;
+        if (!groups.has(key)) groups.set(key, { lines: [], l });
+        groups.get(key).lines.push(l);
+      }
+      for (const { lines: g, l } of groups.values()) {
+        const dates = g.map((x) => x.work_date).sort();
+        const hours = g.reduce((t, x) => t + Number(x.quantity), 0);
+        const classes = [...new Set(g.flatMap((x) => String(x.class_names || '').split(', ').filter(Boolean)))].join(', ');
+        items.push([
+          dates[0] === dates[dates.length - 1] ? dmy(dates[0]) : `${dmy(dates[0])} - ${dmy(dates[dates.length - 1])}`,
+          `Teaching ${l.course_unit_name || ''}: ${g.length} lecture${g.length === 1 ? '' : 's'}, ${hours} contact hour${hours === 1 ? '' : 's'}${classes ? ` (${classes})` : ''}${l.program_level ? `, ${l.program_level}` : ''}`,
+          l.course_unit_code || '',
+          `${money(l.unit_price)}/hour`,
+          money(g.reduce((t, x) => t + Number(x.amount), 0)),
+        ]);
+      }
+      for (const l of lines.filter((l) => l.kind !== 'teaching')) {
+        items.push([dmy(l.work_date), `${l.rate_name}${l.description ? `: ${l.description}` : ''} (${Number(l.quantity)} ${l.unit}${Number(l.quantity) === 1 ? '' : 's'})`, l.course_unit_code || '', `${money(l.unit_price)}/${l.unit}`, money(l.amount)]);
+      }
+      const cols = [['Date', 92], ['Description/Purpose', width - 92 - 62 - 92 - 86], ['Code', 62], ['Rate', 92], ['Total', 86]];
+      const row = (cells, { bold = false, fill = null, color = '#101828' } = {}) => {
+        doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(9);
+        const h = Math.max(...cells.map((c, i) => doc.heightOfString(String(c), { width: cols[i][1] - 8 }))) + 8;
+        ensure(h);
+        if (fill) doc.rect(left, y, width, h).fill(fill);
+        let cx = left;
+        cells.forEach((c, i) => {
+          doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(9).fillColor(color).text(String(c), cx + 4, y + 4, { width: cols[i][1] - 8, align: i >= 3 ? 'right' : 'left' });
+          doc.rect(cx, y, cols[i][1], h).lineWidth(0.5).strokeColor('#98A2B3').stroke();
+          cx += cols[i][1];
+        });
+        y += h;
+      };
+      row(cols.map(([h]) => h), { bold: true, fill: primary, color: '#FFFFFF' });
+      for (const it of items) row(it);
+      row(['', 'Total', '', '', money(claim.total)], { bold: true, fill: '#F2F4F7' });
+      y += 10;
+
+      ensure(40);
+      doc.font('Helvetica').fontSize(9.5).fillColor('#475467').text('Amount in words', left, y, { width: 90 });
+      doc.font('Helvetica-Bold').fillColor('#101828').text(amountInWords(claim.total, claim.currency), left + 92, y, { width: width - 92 });
+      y = doc.y + 14;
+
+      // Sign-off blocks: name, digital signature (sign-off footprint) and date.
+      const signBlock = (title, s, note) => {
+        ensure(44);
+        doc.font('Helvetica-Bold').fontSize(9.5).fillColor('#101828').text(title, left, y, { width });
+        y = doc.y - 4;
+        const third = width / 3;
+        const cells = [['Name', s?.name || ''], ['Digital signature', null], ['Date', stampOf(s)]];
+        cells.forEach(([label, value], i) => {
+          const cx = left + third * i;
+          const lw = label === 'Digital signature' ? 46 : 30;
+          doc.font('Helvetica').fontSize(label === 'Digital signature' ? 7.5 : 9).fillColor('#475467').text(label, cx, label === 'Digital signature' ? y + 10 : y + 14, { width: lw });
+          const vx = cx + lw + 2;
+          const vw = third - lw - 10;
+          if (label === 'Digital signature' && s?.footprint) {
+            doc.font('Courier-Bold').fontSize(9.5).fillColor('#067647').text(s.footprint, vx, y + 14, { width: vw, lineBreak: false });
+          } else if (value) {
+            doc.font('Helvetica-Bold').fontSize(9).fillColor('#101828').text(value, vx, y + 14, { width: vw, height: 12, ellipsis: true });
+          }
+          doc.moveTo(vx, y + 26).lineTo(vx + vw, y + 26).lineWidth(0.5).strokeColor('#98A2B3').dash(1, { space: 1.5 }).stroke().undash();
+        });
+        y += 27;
+        if (note) {
+          doc.font('Helvetica').fontSize(7.5).fillColor('#667085').text(note, left, y + 3, { width });
+          y = doc.y;
+        }
+        y += 6;
+      };
+
+      signBlock('Name & Digital Signature of Claimant', signers.claimant, signers.claimant?.footprint ? 'Signed off and submitted in eCampus.' : null);
+      ensure(40);
+      doc.font('Helvetica-Oblique').fontSize(8).fillColor('#344054').text(
+        `I certify that the information provided herein above is correct to the best of my knowledge and the claim herein truly conforms to the established expenditure estimates and the finance regulations governing ${university.name}.`,
+        left,
+        y,
+        { width },
+      );
+      y = doc.y + 8;
+      signBlock('Verified by Head of Department', signers.hod);
+      signBlock('Signed off by Vote Controller (Dean)', signers.dean, vote ? `Charged to vote ${vote.code} - ${vote.name}.` : null);
+      signBlock('Final approval by HR Officer', signers.hr, cleared ? 'Cleared for payment and printed for submission.' : null);
+
+      // Finance completes these on paper after HR submits the form.
+      const blank = (title, text) => {
+        ensure(text ? 56 : 40);
+        doc.font('Helvetica-Bold').fontSize(9.5).fillColor('#101828').text(title, left, y, { width });
+        y = doc.y + 2;
+        if (text) {
+          doc.font('Helvetica').fontSize(8).fillColor('#344054').text(text, left, y, { width });
+          y = doc.y - 4;
+        }
+        const third = width / 3;
+        ['Name', 'Signature', 'Date'].forEach((label, i) => {
+          const cx = left + third * i;
+          doc.font('Helvetica').fontSize(9).fillColor('#475467').text(label, cx, y + 12, { width: 50, lineBreak: false });
+          doc.moveTo(cx + 52, y + 24).lineTo(cx + third - 8, y + 24).lineWidth(0.5).strokeColor('#98A2B3').dash(1, { space: 1.5 }).stroke().undash();
+        });
+        y += 28;
+      };
+      blank('Checked by Accountant');
+      blank('Passed for payment by University Bursar', 'It is hereby certified that the claimant accounted for the last advance of funds of UGX ............................ and therefore this is passed for payment.');
+      blank('Authorized by University Secretary');
+      ensure(30);
+      doc.font('Helvetica').fontSize(7.5).fillColor('#475467').text(
+        `Digital signatures are eCampus sign-off footprints: each records who signed, in which role, when and for what amount. Check them, the amount and the approval status at ${verify.url} (code ${verify.code}).`,
+        left,
+        y,
+        { width },
+      );
+      y = doc.y + 4;
+
+      // Schedule: every lecture and task on the claim.
+      doc.addPage();
+      y = doc.page.margins.top;
+      doc.font('Helvetica-Bold').fontSize(12).fillColor(primary).text(`Schedule attached to requisition: claim #${claim.id}`, left, y, { width });
+      doc.font('Helvetica').fontSize(9).fillColor('#475467').text(`${claim.lecturer_name} · ${claim.department_name || ''} · ${dmy(claim.period_start)} to ${dmy(claim.period_end)}`, left, doc.y + 2, { width });
+      y = doc.y + 10;
+      const scols = [['Date', 62], ['Item', width - 62 - 64 - 64 - 86 - 80], ['Students', 64], ['Quantity', 64], ['Rate', 86], ['Amount', 80]];
+      const srow = (cells, { bold = false, fill = null, color = '#101828' } = {}) => {
+        doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(8.5);
+        const h = Math.max(...cells.map((c, i) => doc.heightOfString(String(c), { width: scols[i][1] - 8 }))) + 6;
+        if (y + h > bottom()) {
+          doc.addPage();
+          y = doc.page.margins.top;
+        }
+        if (fill) doc.rect(left, y, width, h).fill(fill);
+        let cx = left;
+        cells.forEach((c, i) => {
+          doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(8.5).fillColor(color).text(String(c), cx + 4, y + 3, { width: scols[i][1] - 8, align: i >= 3 ? 'right' : 'left' });
+          cx += scols[i][1];
+        });
+        doc.moveTo(left, y + h).lineTo(left + width, y + h).lineWidth(0.4).strokeColor('#E4E7EC').stroke();
+        y += h;
+      };
+      srow(scols.map(([h]) => h), { bold: true, fill: primary, color: '#FFFFFF' });
+      for (const l of [...lines].sort((a, b) => `${a.work_date}${a.start_time || ''}`.localeCompare(`${b.work_date}${b.start_time || ''}`))) {
+        const item = l.kind === 'teaching'
+          ? `${l.course_unit_code} ${l.course_unit_name || ''}, ${l.start_time}-${l.end_time} (${l.class_names || ''})${l.self_checkins ? ` · ${l.self_checkins} QR check-ins` : ''}`
+          : `${l.rate_name}${l.description ? `: ${l.description}` : ''}`;
+        srow([dmy(l.work_date), item, l.students_total ? `${l.students_present}/${l.students_total}` : '', `${Number(l.quantity)} ${l.unit}${Number(l.quantity) === 1 ? '' : 's'}`, money(l.unit_price), money(l.amount)]);
+      }
+      srow(['', 'Total', '', '', '', money(claim.total)], { bold: true, fill: '#F2F4F7' });
+
+      const range = doc.bufferedPageRange();
+      for (let i = range.start; i < range.start + range.count; i++) {
+        doc.switchToPage(i);
+        const keep = doc.page.margins.bottom;
+        doc.page.margins.bottom = 0;
+        doc.font('Helvetica').fontSize(7.5).fillColor('#98A2B3').text(
+          `${university.short_name || university.name} · Funds requisition #${claim.id} · verify code ${verify.code} · generated ${localStamp(university)} · page ${i + 1} of ${range.count}`,
+          left,
+          doc.page.height - 28,
+          { width, align: 'center', lineBreak: false },
+        );
+        doc.page.margins.bottom = keep;
       }
       doc.end();
     } catch (err) {

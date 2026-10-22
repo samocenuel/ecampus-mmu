@@ -2,6 +2,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { config } from './config.js';
 import { q } from './db.js';
+import { isProtectedDemoAccount } from './demo.js';
 import { HttpError, forbidden } from './util.js';
 
 export const ROLES = ['super_admin', 'admin', 'dean', 'hod', 'lecturer', 'student', 'hr'];
@@ -33,7 +34,8 @@ export function loadUser(id) {
   if (!user) return undefined;
   delete user.password_hash;
   user.photo_url = user.photo_path ? `/uploads/${user.photo_path}` : null;
-  user.must_change_password = Boolean(user.must_change_password);
+  // The shared demo accounts sign in without a password, so they are never asked to change it.
+  user.must_change_password = Boolean(user.must_change_password) && !isProtectedDemoAccount(user);
   const repClasses = q.all('SELECT id, name FROM classes WHERE class_rep_id = ?', id);
   user.rep_classes = repClasses;
   user.is_class_rep = repClasses.length > 0;

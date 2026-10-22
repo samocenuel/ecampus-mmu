@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { BarChart3, Copy, Power, Smartphone, Upload } from 'lucide-react';
+import { BarChart3, Copy, KeyRound, Power, Smartphone, Upload } from 'lucide-react';
 import { api } from '../api';
 import { useAuth } from '../auth';
 import { useFeedback } from '../components/feedback';
@@ -12,13 +12,18 @@ type Tab = 'staff' | 'students' | 'admins';
 const TAB_ROLES: Record<Tab, string> = { staff: 'lecturer,hod,dean', students: 'student', admins: 'admin,hr' };
 const CREATABLE: Record<string, Role[]> = { admin: ['admin', 'hr', 'dean', 'hod', 'lecturer', 'student'], dean: ['hod', 'lecturer', 'student'], hod: ['lecturer', 'student'] };
 
-function TempPassword({ info, onClose }: { info: { name: string; password: string; count?: number } | null; onClose: () => void }) {
+export type TempInfo = { name: string; password: string; count?: number; reset?: boolean; email?: string };
+
+export function TempPassword({ info, onClose }: { info: TempInfo | null; onClose: () => void }) {
   const { toast } = useFeedback();
   if (!info) return null;
   return (
-    <Modal open onClose={onClose} title="Temporary password" footer={<Button onClick={onClose}>Done</Button>}>
+    <Modal open onClose={onClose} title={info.reset ? 'Password reset' : 'Temporary password'} footer={<Button onClick={onClose}>Done</Button>}>
       <p>
-        {info.count ? `${plural(info.count, 'account')} ${info.count === 1 ? 'was' : 'were'} created` : `${info.name}'s account was created`} with this temporary password. Share it securely - it is shown only once, and users can change it from their profile.
+        {info.reset
+          ? `${info.name}${info.email ? ` (${info.email})` : ''} can now sign in with this temporary password, and will be asked to choose a new one straight away.`
+          : `${info.count ? `${plural(info.count, 'account')} ${info.count === 1 ? 'was' : 'were'} created` : `${info.name}'s account was created`} with this temporary password. They will be asked to choose their own password at first sign-in.`}{' '}
+        Share it securely: it is shown only once.
       </p>
       <div className="secret">
         <code>{info.password}</code>
@@ -141,9 +146,9 @@ function StudentHistory({ student, onClose }: { student: any; onClose: () => voi
 
 export default function Users() {
   const { user } = useAuth();
-  const { toast, fail } = useFeedback();
+  const { toast, fail, confirm } = useFeedback();
   const [tab, setTab] = usePersistentState<Tab>('lms_users_tab', 'staff');
-  const [temp, setTemp] = useState<{ name: string; password: string; count?: number } | null>(null);
+  const [temp, setTemp] = useState<TempInfo | null>(null);
   const [importing, setImporting] = useState(false);
   const [history, setHistory] = useState<any>(null);
   const [version, setVersion] = useState(0);
@@ -186,8 +191,18 @@ export default function Users() {
       help: 'A new HoD is appointed to the department if it has none.',
     },
     { name: 'class_id', label: 'Class', type: 'select', required: true, showIf: (f) => f.role === 'student', options: (classes || []).map((x) => ({ value: x.id, label: x.name })) },
-    { name: 'password', label: 'Password', type: 'password', placeholder: 'Leave blank to generate a temporary password', span: 2 },
+    { name: 'password', label: 'Password', type: 'password', placeholder: 'Leave blank to generate a temporary password', span: 2, showIf: (_f, editing) => !editing },
   ];
+
+  const resetPassword = async (u: any) => {
+    if (!(await confirm({ title: `Reset ${u.name}'s password?`, message: 'Their current password stops working. You get a temporary password to give them, and they choose a new one when they sign in.', confirmLabel: 'Reset password' }))) return;
+    try {
+      const r = await api<any>(`/api/users/${u.id}/reset-password`, { method: 'POST' });
+      setTemp({ name: r.name, email: r.email, password: r.temporary_password, reset: true });
+    } catch (err) {
+      fail(err);
+    }
+  };
 
   const resetPhone = async (u: any) => {
     try {
@@ -263,6 +278,11 @@ export default function Users() {
             {u.role === 'student' && u.has_device && (CREATABLE[user!.role] || []).includes('student') && (
               <IconButton label="Reset registered phone (student changed phones)" onClick={() => resetPhone(u)}>
                 <Smartphone size={16} />
+              </IconButton>
+            )}
+            {u.id !== user!.id && (CREATABLE[user!.role] || []).includes(u.role) && (
+              <IconButton label="Reset password" onClick={() => resetPassword(u)}>
+                <KeyRound size={16} />
               </IconButton>
             )}
             {u.id !== user!.id && (CREATABLE[user!.role] || []).includes(u.role) && (

@@ -4,10 +4,11 @@ import { Router } from 'express';
 import { MANAGER_ROLES, TEACHING_ROLES } from '../auth.js';
 import { q, tx, update, insert } from '../db.js';
 import { canManageDepartment, currentTerm, managedDepartmentIds, placeholders } from '../scope.js';
+import { attendanceSheetPdf, attendanceSheetXlsx, registerPdf, registerXlsx } from '../services/exporter.js';
 import { notify } from '../services/notify.js';
 import { localToUtc, occurrenceOn, occurrences, teacherOf } from '../services/occurrences.js';
 import { allocationContext, listSessions } from '../services/timetable.js';
-import { addDays, badRequest, DAY_NAMES, dowOf, forbidden, HttpError, notFound, requireFields, toInt, toMinutes, zonedNow } from '../util.js';
+import { addDays, badRequest, DAY_NAMES, dowOf, forbidden, HttpError, notFound, requireFields, slugify, toInt, toMinutes, zonedNow } from '../util.js';
 
 const router = Router();
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -242,6 +243,98 @@ router.get('/registers/:id', (req, res) => {
     reg.id,
   );
   res.json({ ...reg, students, can_review: a.canReview && reg.status === 'submitted', can_edit: a.isRep && reg.status !== 'approved' });
+});
+
+const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+function sendFile(res, buf, name, format) {
+  res.setHeader('Content-Type', format === 'pdf' ? 'application/pdf' : XLSX);
+  res.setHeader('Content-Disposition', `attachment; filename="${name}.${format}"`);
+  res.send(buf);
+}
+
+/** One lecture's attendance list as PDF (printable, with a signature line) or Excel. */
+router.get('/registers/:id/export', async (req, res) => {
+  const { reg, access: a } = loadRegister(req);
+  if (!a.canView) throw forbidden();
+  const format = req.query.format === 'pdf' ? 'pdf' : 'xlsx';
+  const students = q.all(
+    `SELECT u.name, u.identifier, ar.present, ar.method FROM attendance_records ar JOIN users u ON u.id = ar.student_id
+      WHERE ar.register_id = ? ORDER BY u.name`,
+    reg.id,
+  );
+  const university = q.get('SELECT * FROM universities WHERE id = ?', req.uid);
+  const buf = format === 'pdf' ? await registerPdf(university, reg, students) : await registerXlsx(university, reg, students);
+  sendFile(res, buf, `attendance-${slugify(reg.course_code)}-${slugify(reg.class_name)}-${reg.lecture_date}`, format);
+});
+
+/** A class of a course unit whose term attendance sheet the user may download, or null. */
+function sheetClass(user, allocation, classId) {
+  const cls = allocation.classes.find((c) => c.id === Number(classId));
+  if (!cls) return null;
+  const ok =
+    allocation.lecturer_id === user.id ||
+    cls.class_rep_id === user.id ||
+    (MANAGER_ROLES.includes(user.role) && (canManageDepartment(user, cls.department_id) || canManageDepartment(user, allocation.department_id)));
+  return ok ? cls : null;
+}
+
+/** Course units and classes the user can download a term attendance sheet for. */
+router.get('/sheets', (req, res) => {
+  if (req.user.role === 'student' && !(req.user.rep_classes || []).length) return res.json({ term: null, items: [] });
+  const term = toInt(req.query.term_id)
+    ? q.get('SELECT * FROM academic_terms WHERE id = ? AND university_id = ?', toInt(req.query.term_id), req.uid)
+    : currentTerm(req.uid);
+  if (!term) return res.json({ term: null, items: [] });
+  const items = [];
+  for (const { id } of q.all('SELECT id FROM allocations WHERE university_id = ? AND term_id = ?', req.uid, term.id)) {
+    const a = allocationContext(id, req.uid);
+    const classes = a.classes.filter((c) => sheetClass(req.user, a, c.id));
+    if (!classes.length) continue;
+    const lectures = q.get(
+      `SELECT COUNT(*) AS n FROM attendance_registers r JOIN timetable_sessions s ON s.id = r.session_id
+        WHERE s.allocation_id = ? AND r.status = 'approved'`,
+      a.id,
+    ).n;
+    items.push({ allocation_id: a.id, course_code: a.code, course_name: a.course_name, lecturer_name: a.lecturer_name, registers: lectures, classes: classes.map((c) => ({ id: c.id, name: c.name })) });
+  }
+  items.sort((x, y) => x.course_code.localeCompare(y.course_code));
+  res.json({ term, items });
+});
+
+/** Term attendance sheet for one class of a course unit: every approved lecture, P / A per student, and the percentage. */
+router.get('/sheets/export', async (req, res) => {
+  const a = allocationContext(toInt(req.query.allocation_id), req.uid);
+  if (!a) throw notFound('Course unit');
+  const cls = sheetClass(req.user, a, req.query.class_id);
+  if (!cls) throw forbidden('You cannot download attendance for that class');
+  const format = req.query.format === 'pdf' ? 'pdf' : 'xlsx';
+  const lectures = q.all(
+    `SELECT r.id, r.lecture_date, COALESCE(sc.new_start, s.start_time) AS start_time
+       FROM attendance_registers r JOIN timetable_sessions s ON s.id = r.session_id
+       LEFT JOIN session_changes sc ON sc.session_id = s.id AND sc.action = 'move' AND sc.new_date = r.lecture_date
+      WHERE s.allocation_id = ? AND r.class_id = ? AND r.status = 'approved'
+      ORDER BY r.lecture_date, start_time`,
+    a.id,
+    cls.id,
+  );
+  const students = q.all("SELECT id, name, identifier FROM users WHERE class_id = ? AND role = 'student' AND active = 1 ORDER BY name", cls.id);
+  const marks = new Map(students.map((st) => [st.id, new Map()]));
+  if (lectures.length) {
+    for (const m of q.all(`SELECT register_id, student_id, present FROM attendance_records WHERE register_id IN (${placeholders(lectures.map((l) => l.id))})`, ...lectures.map((l) => l.id))) {
+      marks.get(m.student_id)?.set(m.register_id, m.present ? 1 : 0);
+    }
+  }
+  const university = q.get('SELECT * FROM universities WHERE id = ?', req.uid);
+  const meta = {
+    course_code: a.code,
+    course_name: a.course_name,
+    class_name: cls.name,
+    lecturer_name: a.lecturer_name,
+    term_name: q.get('SELECT name FROM academic_terms WHERE id = ?', a.term_id)?.name,
+  };
+  const rows = students.map((st) => ({ ...st, marks: marks.get(st.id) }));
+  const buf = format === 'pdf' ? await attendanceSheetPdf(university, meta, lectures, rows) : await attendanceSheetXlsx(university, meta, lectures, rows);
+  sendFile(res, buf, `attendance-${slugify(a.code)}-${slugify(cls.name)}`, format);
 });
 
 router.post('/registers/:id/review', (req, res) => {

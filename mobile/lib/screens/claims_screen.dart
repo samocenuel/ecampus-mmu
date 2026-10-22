@@ -220,16 +220,46 @@ class _ClaimDetailScreenState extends State<ClaimDetailScreen> {
     final note = TextEditingController();
     final reference = TextEditingController();
     final paying = mode == 'approve' && claim['status'] == 'hr_verified';
+    // The Dean signs off as Vote Controller against one of the faculty's votes.
+    final signing = mode == 'approve' && claim['status'] == 'hod_approved';
     final label = mode == 'reject' ? 'Return for correction' : claim['next_action'] as String;
+    List<Map> votes = const [];
+    if (signing) {
+      try {
+        votes = ((await context.read<AppState>().api.get('/api/claims/votes?faculty_id=${claim['faculty_id']}&active=1')) as List).cast<Map>();
+      } catch (e) {
+        if (mounted) showError(context, e);
+        return;
+      }
+      if (!mounted) return;
+    }
+    int? voteId = votes.length == 1 ? votes.first['id'] as int : null;
     final ok = await showDialog<bool>(
       context: context,
-      builder: (dialog) => AlertDialog(
+      builder: (dialog) => StatefulBuilder(
+        builder: (dialog, setLocal) => AlertDialog(
         title: Text(label),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             Text('${claim['lecturer_name']}: ${money(claim['total'] as num?, claim['currency'] as String?)}'),
             const SizedBox(height: 12),
+            if (signing && votes.isEmpty)
+              const Text('There are no votes for this faculty yet. Create one on the web under Pay claims, Votes & budgets, then sign off.'),
+            if (signing && votes.isNotEmpty)
+              DropdownButtonFormField<int>(
+                initialValue: voteId,
+                isExpanded: true,
+                decoration: const InputDecoration(labelText: 'Charge to vote *'),
+                items: [
+                  for (final v in votes)
+                    DropdownMenuItem(
+                      value: v['id'] as int,
+                      child: Text('${v['code']} · balance ${money(v['balance'] as num?, claim['currency'] as String?)}', overflow: TextOverflow.ellipsis),
+                    ),
+                ],
+                onChanged: (v) => setLocal(() => voteId = v),
+              ),
             if (paying)
               TextField(
                 controller: reference,
@@ -244,15 +274,16 @@ class _ClaimDetailScreenState extends State<ClaimDetailScreen> {
         ),
         actions: [
           TextButton(onPressed: () => Navigator.of(dialog).pop(false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.of(dialog).pop(true), child: Text(label)),
+          FilledButton(onPressed: signing && voteId == null ? null : () => Navigator.of(dialog).pop(true), child: Text(label)),
         ],
+      ),
       ),
     );
     if (ok != true || !mounted) return;
     final api = context.read<AppState>().api;
     await _run(
-      () async => api.post('/api/claims/${claim['id']}/$mode', {'note': note.text, 'payment_reference': reference.text}),
-      mode == 'reject' ? 'Claim returned to the lecturer' : (paying ? 'Payment recorded' : 'Claim approved'),
+      () async => api.post('/api/claims/${claim['id']}/$mode', {'note': note.text, 'payment_reference': reference.text, 'vote_id': ?voteId}),
+      mode == 'reject' ? 'Claim returned to the lecturer' : (paying ? 'Payment recorded' : claim['status'] == 'dean_approved' ? 'Final approval given' : 'Claim signed off'),
     );
   }
 
@@ -285,7 +316,7 @@ class _ClaimDetailScreenState extends State<ClaimDetailScreen> {
                     for (final r in rates)
                       DropdownMenuItem(
                         value: r,
-                        child: Text('${r['name']} · ${money(r['amount'] as num?, claim['currency'] as String?)}/${r['unit']}', overflow: TextOverflow.ellipsis),
+                        child: Text('${r['name']}${r['program_level'] != null ? ' (${r['program_level']})' : ''} · ${money(r['amount'] as num?, claim['currency'] as String?)}/${r['unit']}', overflow: TextOverflow.ellipsis),
                       ),
                   ],
                   onChanged: (r) => setLocal(() => rate = r ?? rate),
@@ -392,7 +423,22 @@ class _ClaimDetailScreenState extends State<ClaimDetailScreen> {
     final app = context.watch<AppState>();
     final scheme = Theme.of(context).colorScheme;
     return Scaffold(
-      appBar: AppBar(title: const Text('Pay claim')),
+      appBar: AppBar(
+        title: const Text('Pay claim'),
+        actions: [
+          IconButton(
+            tooltip: 'Requisition form (PDF)',
+            icon: const Icon(Icons.receipt_long_outlined),
+            onPressed: () async {
+              try {
+                await app.openExport('/api/claims/${widget.id}/requisition');
+              } catch (e) {
+                if (context.mounted) showError(context, e);
+              }
+            },
+          ),
+        ],
+      ),
       body: AsyncView<Map>(
         key: ValueKey(_version),
         load: () async => await app.api.get('/api/claims/${widget.id}') as Map,
