@@ -37,39 +37,71 @@ class _ResearchScreenState extends State<ResearchScreen> {
           builder: (context, data, reload) {
             final elig = data[0] as Map;
             final mine = (data[1] as List).cast<Map>();
-            return ListView(padding: const EdgeInsets.all(12), children: [
-              if (elig['eligible'] == true)
-                SectionCard(
-                  title: 'Your ${'${elig['kind_label']}'.toLowerCase()}',
-                  child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                    Text('Submit a concept to your research coordinator. After the presentation, supervisors are assigned; then you submit ${elig['reports_required']} progress reports, your intent to submit and the final work, and defend it.'),
-                    const SizedBox(height: 12),
-                    FilledButton.icon(onPressed: () => _start(elig), icon: const Icon(Icons.add), label: Text('Start your ${'${elig['kind_label']}'.toLowerCase()}')),
-                  ]),
-                )
-              else if (mine.isEmpty)
-                EmptyView(icon: Icons.science_outlined, title: 'Research', message: '${elig['reason']}'),
-              for (final p in mine) _ProjectTile(project: p, onOpen: () => setState(() => _version++)),
-            ]);
+            return ListView(
+              padding: const EdgeInsets.all(12),
+              children: [
+                if (elig['eligible'] == true)
+                  SectionCard(
+                    title: 'Start your ${'${elig['kind_label']}'.toLowerCase()}',
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Text('Step 1 is your concept. It goes to ${(elig['coordinators'] as List? ?? const []).isEmpty ? 'your Head of Department (no research coordinator is appointed yet)' : (elig['coordinators'] as List).map((c) => [c['title'], c['name']].whereType<String>().join(' ')).join(', ')}.'),
+                        const SizedBox(height: 12),
+                        FilledButton.icon(onPressed: () => _start(elig), icon: const Icon(Icons.add), label: const Text('Submit a concept')),
+                      ],
+                    ),
+                  )
+                else if (mine.isEmpty)
+                  EmptyView(icon: Icons.science_outlined, title: 'Research', message: '${elig['reason']}'),
+                for (final p in mine) _ProjectTile(project: p, onOpen: () => setState(() => _version++)),
+                const HowItWorksCard(),
+              ],
+            );
           },
         ),
       );
     }
-    const views = [('awaiting', 'Awaiting me'), ('supervising', 'I supervise'), ('all', 'All'), ('cleared', 'Cleared')];
+    final views = [('awaiting', 'Awaiting me'), ('supervising', 'I supervise'), ('all', 'All'), ('cleared', 'Cleared'), if (app.isManager) ('setup', 'Set-up')];
     return DefaultTabController(
       length: views.length,
       child: Scaffold(
-        appBar: AppBar(title: const Text('Research'), bottom: TabBar(isScrollable: true, tabAlignment: TabAlignment.start, tabs: [for (final v in views) Tab(text: v.$2)])),
-        body: TabBarView(children: [
-          for (final v in views)
-            AsyncView<List>(
-              key: ValueKey('${v.$1}-$_version'),
-              load: () async => await app.api.get('/api/research?view=${v.$1}') as List,
-              builder: (context, list, reload) => list.isEmpty
-                  ? ListView(children: const [SizedBox(height: 60), EmptyView(icon: Icons.science_outlined, title: 'Nothing here')])
-                  : ListView(padding: const EdgeInsets.all(12), children: [for (final p in list.cast<Map>()) _ProjectTile(project: p, onOpen: () => setState(() => _version++))]),
-            ),
-        ]),
+        appBar: AppBar(
+          title: const Text('Research'),
+          bottom: TabBar(
+            isScrollable: true,
+            tabAlignment: TabAlignment.start,
+            tabs: [for (final v in views) Tab(text: v.$2)],
+          ),
+        ),
+        body: TabBarView(
+          children: [
+            for (final v in views)
+              if (v.$1 == 'setup')
+                const ResearchSetupView()
+              else
+                AsyncView<List>(
+                  key: ValueKey('${v.$1}-$_version'),
+                  load: () async => await app.api.get('/api/research?view=${v.$1}') as List,
+                  builder: (context, list, reload) => list.isEmpty
+                      ? ListView(
+                          padding: const EdgeInsets.all(12),
+                          children: const [
+                            SizedBox(height: 30),
+                            EmptyView(icon: Icons.science_outlined, title: 'Nothing here'),
+                            HowItWorksCard(),
+                          ],
+                        )
+                      : ListView(
+                          padding: const EdgeInsets.all(12),
+                          children: [
+                            for (final p in list.cast<Map>()) _ProjectTile(project: p, onOpen: () => setState(() => _version++)),
+                            const HowItWorksCard(),
+                          ],
+                        ),
+                ),
+          ],
+        ),
       ),
     );
   }
@@ -88,13 +120,9 @@ class _ProjectTile extends StatelessWidget {
       margin: const EdgeInsets.only(bottom: 8),
       child: ListTile(
         title: Text('${p['title']}', style: const TextStyle(fontWeight: FontWeight.w600)),
-        subtitle: Text([
-          '${p['kind_label']} · ${p['student_name']}',
-          '${p['status_label']}',
-          if (p['waiting_for'] != null && !['cleared', 'rejected'].contains(p['status'])) 'Waiting for: ${p['waiting_for']}',
-        ].join('\n')),
+        subtitle: Text(['${p['kind_label']} · ${p['student_name']}', _stepLine(p), if (p['guide']?['next'] != null) 'Next: ${p['guide']['next']['who']}, ${_lowerFirst('${p['guide']['next']['text']}')}'].join('\n')),
         isThreeLine: true,
-        trailing: (p['actions'] as List).any((a) => !['propose_mentor', 'assign_supervisor'].contains(a)) ? Icon(Icons.pending_actions, color: scheme.primary) : null,
+        trailing: p['guide']?['your_turn'] == true ? Chip(label: const Text('Your turn'), backgroundColor: scheme.tertiaryContainer, visualDensity: VisualDensity.compact) : null,
         onTap: () async {
           await Navigator.of(context).push(MaterialPageRoute(builder: (_) => ResearchDetailScreen(id: p['id'] as int)));
           onOpen();
@@ -115,7 +143,9 @@ class ConceptPage extends StatefulWidget {
 }
 
 class _ConceptPageState extends State<ConceptPage> {
-  late final _f = {for (final k in ['title', 'problem', 'objectives', 'methodology']) k: TextEditingController(text: '${widget.project?[k] ?? ''}')};
+  late final _f = {
+    for (final k in ['title', 'problem', 'objectives', 'methodology']) k: TextEditingController(text: '${widget.project?[k] ?? ''}'),
+  };
   PlatformFile? _file;
   bool _busy = false;
 
@@ -127,14 +157,7 @@ class _ConceptPageState extends State<ConceptPage> {
     try {
       final bytes = _file == null ? null : await _file!.readAsBytes();
       if (!mounted) return;
-      final res = await context.read<AppState>().api.uploadForm(
-            widget.project == null ? '/api/research' : '/api/research/${widget.project!['id']}/concept',
-            {for (final e in _f.entries) e.key: e.value.text},
-            method: widget.project == null ? 'POST' : 'PUT',
-            bytes: bytes,
-            filename: _file?.name,
-            contentType: _mime(_file?.extension),
-          );
+      final res = await context.read<AppState>().api.uploadForm(widget.project == null ? '/api/research' : '/api/research/${widget.project!['id']}/concept', {for (final e in _f.entries) e.key: e.value.text}, method: widget.project == null ? 'POST' : 'PUT', bytes: bytes, filename: _file?.name, contentType: _mime(_file?.extension));
       if (mounted) Navigator.pop(context, res as Map);
     } catch (e) {
       if (mounted) showError(context, e);
@@ -147,25 +170,51 @@ class _ConceptPageState extends State<ConceptPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: Text(widget.project == null ? '${widget.kind} concept' : 'Revise concept')),
-      bottomNavigationBar: SafeArea(child: Padding(padding: const EdgeInsets.all(12), child: FilledButton(onPressed: _busy ? null : _send, child: Text(widget.project == null ? 'Submit concept' : 'Resubmit concept')))),
-      body: ListView(padding: const EdgeInsets.all(16), children: [
-        TextField(controller: _f['title'], decoration: const InputDecoration(labelText: 'Title *')),
-        const SizedBox(height: 10),
-        TextField(controller: _f['problem'], minLines: 3, maxLines: 6, decoration: const InputDecoration(labelText: 'Problem statement *')),
-        const SizedBox(height: 10),
-        TextField(controller: _f['objectives'], minLines: 2, maxLines: 5, decoration: const InputDecoration(labelText: 'Objectives *')),
-        const SizedBox(height: 10),
-        TextField(controller: _f['methodology'], minLines: 2, maxLines: 5, decoration: const InputDecoration(labelText: 'Methodology')),
-        const SizedBox(height: 10),
-        OutlinedButton.icon(
-          onPressed: () async {
-            final f = await pickDocument();
-            if (f != null) setState(() => _file = f);
-          },
-          icon: const Icon(Icons.attach_file),
-          label: Text(_file?.name ?? 'Attach concept paper (optional)'),
+      bottomNavigationBar: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: FilledButton(onPressed: _busy ? null : _send, child: Text(widget.project == null ? 'Submit concept' : 'Resubmit concept')),
         ),
-      ]),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          TextField(
+            controller: _f['title'],
+            decoration: const InputDecoration(labelText: 'Title *'),
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: _f['problem'],
+            minLines: 3,
+            maxLines: 6,
+            decoration: const InputDecoration(labelText: 'Problem statement *'),
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: _f['objectives'],
+            minLines: 2,
+            maxLines: 5,
+            decoration: const InputDecoration(labelText: 'Objectives *'),
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: _f['methodology'],
+            minLines: 2,
+            maxLines: 5,
+            decoration: const InputDecoration(labelText: 'Methodology'),
+          ),
+          const SizedBox(height: 10),
+          OutlinedButton.icon(
+            onPressed: () async {
+              final f = await pickDocument();
+              if (f != null) setState(() => _file = f);
+            },
+            icon: const Icon(Icons.attach_file),
+            label: Text(_file?.name ?? 'Attach concept paper (optional)'),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -173,13 +222,13 @@ class _ConceptPageState extends State<ConceptPage> {
 Future<PlatformFile?> pickDocument() => FilePicker.pickFile(type: FileType.custom, allowedExtensions: ['pdf', 'doc', 'docx', 'ppt', 'pptx']);
 
 String? _mime(String? ext) => switch ((ext ?? '').toLowerCase()) {
-      'pdf' => 'application/pdf',
-      'doc' => 'application/msword',
-      'docx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      'ppt' => 'application/vnd.ms-powerpoint',
-      'pptx' => 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-      _ => null,
-    };
+  'pdf' => 'application/pdf',
+  'doc' => 'application/msword',
+  'docx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'ppt' => 'application/vnd.ms-powerpoint',
+  'pptx' => 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  _ => null,
+};
 
 const _actionLabels = {
   'schedule_presentation': 'Schedule presentation',
@@ -201,12 +250,7 @@ const _actionLabels = {
 };
 const _needsNote = {'return_concept', 'reject', 'presentation_revise', 'return_intent', 'return_final', 'defence_corrections', 'return_corrections'};
 const _needsDate = {'schedule_presentation', 'schedule_defence'};
-const _uploads = {
-  'submit_report': ('Submit progress report', 'reports', false),
-  'submit_intent': ('Submit intent to submit', 'intent', false),
-  'submit_final': ('Submit final work', 'final', true),
-  'submit_corrections': ('Submit corrections', 'corrections', true),
-};
+const _uploads = {'submit_report': ('Submit progress report', 'reports', false), 'submit_intent': ('Submit intent to submit', 'intent', false), 'submit_final': ('Submit final work', 'final', true), 'submit_corrections': ('Submit corrections', 'corrections', true)};
 
 class ResearchDetailScreen extends StatefulWidget {
   const ResearchDetailScreen({super.key, required this.id});
@@ -248,22 +292,34 @@ class _ResearchDetailScreenState extends State<ResearchDetailScreen> {
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setLocal) => AlertDialog(
           title: const Text('Assign supervisor'),
-          content: Column(mainAxisSize: MainAxisSize.min, children: [
-            DropdownButtonFormField<int>(
-              isExpanded: true,
-              initialValue: userId,
-              decoration: const InputDecoration(labelText: 'Lecturer'),
-              items: [for (final u in staff.cast<Map>()) DropdownMenuItem(value: u['id'] as int, child: Text('${u['name']}', overflow: TextOverflow.ellipsis))],
-              onChanged: (v) => setLocal(() => userId = v),
-            ),
-            const SizedBox(height: 8),
-            DropdownButtonFormField<String>(
-              initialValue: role,
-              decoration: const InputDecoration(labelText: 'Role'),
-              items: const [DropdownMenuItem(value: 'main', child: Text('Main supervisor')), DropdownMenuItem(value: 'co', child: Text('Co-supervisor'))],
-              onChanged: (v) => setLocal(() => role = v ?? 'main'),
-            ),
-          ]),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              DropdownButtonFormField<int>(
+                isExpanded: true,
+                initialValue: userId,
+                decoration: const InputDecoration(labelText: 'Lecturer'),
+                items: [
+                  for (final u in staff.cast<Map>())
+                    DropdownMenuItem(
+                      value: u['id'] as int,
+                      child: Text('${u['name']}', overflow: TextOverflow.ellipsis),
+                    ),
+                ],
+                onChanged: (v) => setLocal(() => userId = v),
+              ),
+              const SizedBox(height: 8),
+              DropdownButtonFormField<String>(
+                initialValue: role,
+                decoration: const InputDecoration(labelText: 'Role'),
+                items: const [
+                  DropdownMenuItem(value: 'main', child: Text('Main supervisor')),
+                  DropdownMenuItem(value: 'co', child: Text('Co-supervisor')),
+                ],
+                onChanged: (v) => setLocal(() => role = v ?? 'main'),
+              ),
+            ],
+          ),
           actions: [
             TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
             FilledButton(onPressed: userId == null ? null : () => Navigator.pop(ctx, true), child: const Text('Assign')),
@@ -275,18 +331,37 @@ class _ResearchDetailScreenState extends State<ResearchDetailScreen> {
   }
 
   Future<void> _proposeMentor(Map p) async {
-    final f = {for (final k in ['name', 'institution', 'email', 'phone']) k: TextEditingController()};
+    final f = {
+      for (final k in ['name', 'institution', 'email', 'phone']) k: TextEditingController(),
+    };
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Propose a mentor'),
         content: SingleChildScrollView(
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            TextField(controller: f['name'], decoration: const InputDecoration(labelText: 'Name *')),
-            TextField(controller: f['institution'], decoration: const InputDecoration(labelText: 'Institution or company')),
-            TextField(controller: f['email'], keyboardType: TextInputType.emailAddress, decoration: const InputDecoration(labelText: 'Email')),
-            TextField(controller: f['phone'], keyboardType: TextInputType.phone, decoration: const InputDecoration(labelText: 'Phone')),
-          ]),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: f['name'],
+                decoration: const InputDecoration(labelText: 'Name *'),
+              ),
+              TextField(
+                controller: f['institution'],
+                decoration: const InputDecoration(labelText: 'Institution or company'),
+              ),
+              TextField(
+                controller: f['email'],
+                keyboardType: TextInputType.emailAddress,
+                decoration: const InputDecoration(labelText: 'Email'),
+              ),
+              TextField(
+                controller: f['phone'],
+                keyboardType: TextInputType.phone,
+                decoration: const InputDecoration(labelText: 'Phone'),
+              ),
+            ],
+          ),
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
@@ -310,26 +385,43 @@ class _ResearchDetailScreenState extends State<ResearchDetailScreen> {
         builder: (ctx, setLocal) => AlertDialog(
           title: Text(_actionLabels[action]!),
           content: SingleChildScrollView(
-            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-              if (_needsDate.contains(action)) ...[
-                OutlinedButton.icon(
-                  icon: const Icon(Icons.event),
-                  label: Text(date == null ? 'Choose date and time *' : '${isoDate(date!)} ${date!.hour.toString().padLeft(2, '0')}:${date!.minute.toString().padLeft(2, '0')}'),
-                  onPressed: () async {
-                    final d = await showDatePicker(context: ctx, firstDate: DateTime.now().subtract(const Duration(days: 1)), lastDate: DateTime.now().add(const Duration(days: 365)), initialDate: DateTime.now());
-                    if (d == null || !ctx.mounted) return;
-                    final t = await showTimePicker(context: ctx, initialTime: const TimeOfDay(hour: 10, minute: 0));
-                    if (t == null) return;
-                    setLocal(() => date = DateTime(d.year, d.month, d.day, t.hour, t.minute));
-                  },
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (_needsDate.contains(action)) ...[
+                  OutlinedButton.icon(
+                    icon: const Icon(Icons.event),
+                    label: Text(date == null ? 'Choose date and time *' : '${isoDate(date!)} ${date!.hour.toString().padLeft(2, '0')}:${date!.minute.toString().padLeft(2, '0')}'),
+                    onPressed: () async {
+                      final d = await showDatePicker(context: ctx, firstDate: DateTime.now().subtract(const Duration(days: 1)), lastDate: DateTime.now().add(const Duration(days: 365)), initialDate: DateTime.now());
+                      if (d == null || !ctx.mounted) return;
+                      final t = await showTimePicker(context: ctx, initialTime: const TimeOfDay(hour: 10, minute: 0));
+                      if (t == null) return;
+                      setLocal(() => date = DateTime(d.year, d.month, d.day, t.hour, t.minute));
+                    },
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: venue,
+                    decoration: const InputDecoration(labelText: 'Venue'),
+                  ),
+                  if (action == 'schedule_defence') ...[
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: panel,
+                      decoration: const InputDecoration(labelText: 'Panel'),
+                    ),
+                  ],
+                  const SizedBox(height: 8),
+                ],
+                TextField(
+                  controller: note,
+                  maxLines: 3,
+                  decoration: InputDecoration(labelText: _needsNote.contains(action) ? 'Note *' : 'Note (optional)'),
                 ),
-                const SizedBox(height: 8),
-                TextField(controller: venue, decoration: const InputDecoration(labelText: 'Venue')),
-                if (action == 'schedule_defence') ...[const SizedBox(height: 8), TextField(controller: panel, decoration: const InputDecoration(labelText: 'Panel'))],
-                const SizedBox(height: 8),
               ],
-              TextField(controller: note, maxLines: 3, decoration: InputDecoration(labelText: _needsNote.contains(action) ? 'Note *' : 'Note (optional)')),
-            ]),
+            ),
           ),
           actions: [
             TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
@@ -341,13 +433,7 @@ class _ResearchDetailScreenState extends State<ResearchDetailScreen> {
     if (ok != true || !mounted) return;
     try {
       final d = date;
-      await context.read<AppState>().api.post('/api/research/${p['id']}/action', {
-        'action': action,
-        'note': note.text,
-        if (d != null) 'date': '${isoDate(d)} ${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}',
-        'venue': venue.text,
-        'panel': panel.text,
-      });
+      await context.read<AppState>().api.post('/api/research/${p['id']}/action', {'action': action, 'note': note.text, if (d != null) 'date': '${isoDate(d)} ${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}', 'venue': venue.text, 'panel': panel.text});
       if (mounted) showMessage(context, '${_actionLabels[action]}: done');
       _refresh();
     } catch (e) {
@@ -366,19 +452,32 @@ class _ResearchDetailScreenState extends State<ResearchDetailScreen> {
         builder: (ctx, setLocal) => AlertDialog(
           title: Text(label),
           content: SingleChildScrollView(
-            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-              if (action == 'submit_report') TextField(controller: title, decoration: const InputDecoration(labelText: 'Title *')),
-              TextField(controller: summary, minLines: 2, maxLines: 5, decoration: const InputDecoration(labelText: 'Summary')),
-              const SizedBox(height: 8),
-              OutlinedButton.icon(
-                onPressed: () async {
-                  final f = await pickDocument();
-                  if (f != null) setLocal(() => file = f);
-                },
-                icon: const Icon(Icons.attach_file),
-                label: Text(file?.name ?? (fileRequired ? 'Attach document *' : 'Attach document')),
-              ),
-            ]),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (action == 'submit_report')
+                  TextField(
+                    controller: title,
+                    decoration: const InputDecoration(labelText: 'Title *'),
+                  ),
+                TextField(
+                  controller: summary,
+                  minLines: 2,
+                  maxLines: 5,
+                  decoration: const InputDecoration(labelText: 'Summary'),
+                ),
+                const SizedBox(height: 8),
+                OutlinedButton.icon(
+                  onPressed: () async {
+                    final f = await pickDocument();
+                    if (f != null) setLocal(() => file = f);
+                  },
+                  icon: const Icon(Icons.attach_file),
+                  label: Text(file?.name ?? (fileRequired ? 'Attach document *' : 'Attach document')),
+                ),
+              ],
+            ),
           ),
           actions: [
             TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
@@ -406,7 +505,11 @@ class _ResearchDetailScreenState extends State<ResearchDetailScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text('${action == 'approve' ? 'Approve' : 'Return'} report ${r['number']}'),
-        content: TextField(controller: note, maxLines: 3, decoration: InputDecoration(labelText: action == 'return' ? 'What should change? *' : 'Comment (optional)')),
+        content: TextField(
+          controller: note,
+          maxLines: 3,
+          decoration: InputDecoration(labelText: action == 'return' ? 'What should change? *' : 'Comment (optional)'),
+        ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
           FilledButton(onPressed: () => Navigator.pop(ctx, true), child: Text(action == 'approve' ? 'Approve' : 'Return')),
@@ -434,153 +537,408 @@ class _ResearchDetailScreenState extends State<ResearchDetailScreen> {
         builder: (context, p, reload) {
           final actions = (p['actions'] as List).cast<String>();
           final cal = p['calendar'] as Map? ?? const {};
-          return ListView(padding: const EdgeInsets.all(12), children: [
-            SectionCard(
-              title: '${p['title']}',
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text('${p['kind_label']} · ${p['student_name']}${p['student_identifier'] != null ? ' (${p['student_identifier']})' : ''}'),
-                const SizedBox(height: 6),
-                Text('${p['status_label']}', style: TextStyle(fontWeight: FontWeight.w700, color: p['status'] == 'cleared' ? Colors.green.shade700 : p['status'] == 'rejected' ? scheme.error : scheme.primary)),
-                if (p['waiting_for'] != null && !['cleared', 'rejected'].contains(p['status'])) Text('Waiting for: ${p['waiting_for']}', style: TextStyle(color: scheme.onSurfaceVariant)),
-                if (p['outcome_note'] != null) Text('Note: ${p['outcome_note']}'),
-                const SizedBox(height: 10),
-                Wrap(spacing: 8, runSpacing: 8, children: [
-                  for (final a in actions)
-                    if (_actionLabels.containsKey(a))
-                      FilledButton.tonal(onPressed: () => _act(p, a), child: Text(_actionLabels[a]!))
-                    else if (_uploads.containsKey(a))
-                      FilledButton.icon(onPressed: () => _upload(p, a), icon: const Icon(Icons.upload_file), label: Text(_uploads[a]!.$1))
-                    else if (a == 'resubmit_concept')
-                      FilledButton.icon(
-                        onPressed: () async {
-                          await Navigator.of(context).push(MaterialPageRoute(builder: (_) => ConceptPage(kind: p['kind_label'] as String, project: p)));
-                          _refresh();
-                        },
-                        icon: const Icon(Icons.edit),
-                        label: const Text('Revise concept'),
+          return ListView(
+            padding: const EdgeInsets.all(12),
+            children: [
+              SectionCard(
+                title: '${p['title']}',
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('${p['kind_label']} · ${p['student_name']}${p['student_identifier'] != null ? ' (${p['student_identifier']})' : ''}'),
+                    const SizedBox(height: 6),
+                    Text(
+                      _stepLine(p),
+                      style: TextStyle(
+                        fontWeight: FontWeight.w700,
+                        color: p['status'] == 'cleared'
+                            ? Colors.green.shade700
+                            : p['status'] == 'rejected'
+                            ? scheme.error
+                            : scheme.primary,
                       ),
-                  if (p['status'] == 'cleared')
-                    FilledButton.icon(
-                      onPressed: () => app.openExport('/api/research/${p['id']}/certificate').catchError((e) {
-                        if (context.mounted) showError(context, e);
-                      }),
-                      icon: const Icon(Icons.workspace_premium_outlined),
-                      label: const Text('Clearance certificate'),
                     ),
-                ]),
-              ]),
-            ),
-            if (cal['presentation'] != null || cal['defence'] != null)
-              SectionCard(
-                title: 'Coming up',
-                child: Column(children: [
-                  if (cal['presentation'] != null)
-                    ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      leading: const Icon(Icons.co_present_outlined),
-                      title: const Text('Concept presentation'),
-                      subtitle: Text('${p['presentation_at']}${p['presentation_venue'] != null ? ' · ${p['presentation_venue']}' : ''}'),
-                      trailing: IconButton(tooltip: 'Add to Google Calendar', icon: const Icon(Icons.event_available), onPressed: () => launchUrl(Uri.parse(cal['presentation'] as String), mode: LaunchMode.externalApplication)),
+                    if (p['guide']?['next'] != null) ...[
+                      const SizedBox(height: 6),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(color: p['guide']['your_turn'] == true ? scheme.tertiaryContainer : scheme.surfaceContainerHighest, borderRadius: BorderRadius.circular(8)),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(p['guide']['your_turn'] == true ? 'Your step' : 'Next: ${p['guide']['next']['who']}', style: const TextStyle(fontWeight: FontWeight.w700)),
+                            Text('${p['guide']['you'] ?? p['guide']['next']['text']}'),
+                          ],
+                        ),
+                      ),
+                    ] else if (p['guide']?['you'] != null)
+                      Text('${p['guide']['you']}'),
+                    if (p['outcome_note'] != null) Text('Note: ${p['outcome_note']}'),
+                    const SizedBox(height: 10),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        for (final a in actions)
+                          if (_actionLabels.containsKey(a))
+                            FilledButton.tonal(onPressed: () => _act(p, a), child: Text(_actionLabels[a]!))
+                          else if (_uploads.containsKey(a))
+                            FilledButton.icon(onPressed: () => _upload(p, a), icon: const Icon(Icons.upload_file), label: Text(_uploads[a]!.$1))
+                          else if (a == 'resubmit_concept')
+                            FilledButton.icon(
+                              onPressed: () async {
+                                await Navigator.of(context).push(
+                                  MaterialPageRoute(
+                                    builder: (_) => ConceptPage(kind: p['kind_label'] as String, project: p),
+                                  ),
+                                );
+                                _refresh();
+                              },
+                              icon: const Icon(Icons.edit),
+                              label: const Text('Revise concept'),
+                            ),
+                        if (p['status'] == 'cleared')
+                          FilledButton.icon(
+                            onPressed: () => app.openExport('/api/research/${p['id']}/certificate').catchError((e) {
+                              if (context.mounted) showError(context, e);
+                            }),
+                            icon: const Icon(Icons.workspace_premium_outlined),
+                            label: const Text('Clearance certificate'),
+                          ),
+                      ],
                     ),
-                  if (cal['defence'] != null)
-                    ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      leading: const Icon(Icons.gavel_outlined),
-                      title: const Text('Defence'),
-                      subtitle: Text('${p['defence_at']}${p['defence_venue'] != null ? ' · ${p['defence_venue']}' : ''}${p['defence_panel'] != null ? '\nPanel: ${p['defence_panel']}' : ''}'),
-                      trailing: IconButton(tooltip: 'Add to Google Calendar', icon: const Icon(Icons.event_available), onPressed: () => launchUrl(Uri.parse(cal['defence'] as String), mode: LaunchMode.externalApplication)),
-                    ),
-                ]),
+                  ],
+                ),
               ),
+              if (p['status'] != 'rejected' && p['guide'] != null) _StepsCard(steps: (p['guide']['steps'] as List).cast<Map>()),
+              if (cal['presentation'] != null || cal['defence'] != null)
+                SectionCard(
+                  title: 'Coming up',
+                  child: Column(
+                    children: [
+                      if (cal['presentation'] != null)
+                        ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          leading: const Icon(Icons.co_present_outlined),
+                          title: const Text('Concept presentation'),
+                          subtitle: Text('${p['presentation_at']}${p['presentation_venue'] != null ? ' · ${p['presentation_venue']}' : ''}'),
+                          trailing: IconButton(
+                            tooltip: 'Add to Google Calendar',
+                            icon: const Icon(Icons.event_available),
+                            onPressed: () => launchUrl(Uri.parse(cal['presentation'] as String), mode: LaunchMode.externalApplication),
+                          ),
+                        ),
+                      if (cal['defence'] != null)
+                        ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          leading: const Icon(Icons.gavel_outlined),
+                          title: const Text('Defence'),
+                          subtitle: Text('${p['defence_at']}${p['defence_venue'] != null ? ' · ${p['defence_venue']}' : ''}${p['defence_panel'] != null ? '\nPanel: ${p['defence_panel']}' : ''}'),
+                          trailing: IconButton(
+                            tooltip: 'Add to Google Calendar',
+                            icon: const Icon(Icons.event_available),
+                            onPressed: () => launchUrl(Uri.parse(cal['defence'] as String), mode: LaunchMode.externalApplication),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              SectionCard(
+                title: 'Supervisors and mentors',
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if ((p['supervisors'] as List).isEmpty) Text('No supervisors yet', style: TextStyle(color: scheme.onSurfaceVariant)),
+                    for (final s in (p['supervisors'] as List))
+                      ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: const Icon(Icons.person_outline),
+                        title: Text('${s['name']}'),
+                        subtitle: Text(s['role'] == 'main' ? 'Main supervisor' : 'Co-supervisor'),
+                        trailing: actions.contains('assign_supervisor') ? IconButton(tooltip: 'Remove', icon: const Icon(Icons.close), onPressed: () => _call(() => app.api.delete('/api/research/${p['id']}/supervisors/${s['id']}'), 'Supervisor removed')) : null,
+                      ),
+                    for (final m in (p['mentors'] as List))
+                      ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: const Icon(Icons.handshake_outlined),
+                        title: Text('Mentor: ${m['name']}'),
+                        subtitle: Text([if (m['institution'] != null) '${m['institution']}', '${m['status']}'].join(' · ')),
+                        trailing: actions.contains('decide_mentor') && m['status'] == 'proposed'
+                            ? Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  IconButton(tooltip: 'Confirm', icon: const Icon(Icons.check_circle_outline), onPressed: () => _call(() => app.api.post('/api/research/${p['id']}/mentors/${m['id']}/decision', {'decision': 'confirm'}), 'Mentor confirmed')),
+                                  IconButton(tooltip: 'Decline', icon: const Icon(Icons.block), onPressed: () => _call(() => app.api.post('/api/research/${p['id']}/mentors/${m['id']}/decision', {'decision': 'decline'}), 'Mentor declined')),
+                                ],
+                              )
+                            : null,
+                      ),
+                    Wrap(
+                      spacing: 8,
+                      children: [
+                        if (actions.contains('assign_supervisor')) TextButton.icon(onPressed: () => _assignSupervisor(p), icon: const Icon(Icons.person_add_alt), label: const Text('Assign supervisor')),
+                        if (actions.contains('propose_mentor')) TextButton.icon(onPressed: () => _proposeMentor(p), icon: const Icon(Icons.group_add_outlined), label: const Text('Propose a mentor')),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              if ((p['reports'] as List).isNotEmpty || p['status'] == 'in_progress')
+                SectionCard(
+                  title: 'Progress reports (${p['approved_reports']}/${p['reports_required']} approved)',
+                  child: Column(
+                    children: [
+                      for (final r in (p['reports'] as List).cast<Map>())
+                        ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          title: Text('${r['number']}. ${r['title']}'),
+                          subtitle: Text('${r['status']}${r['hod_note'] ?? r['supervisor_note'] != null ? ' · ${r['hod_note'] ?? r['supervisor_note']}' : ''}'),
+                          trailing: actions.contains('review_report') && ['submitted', 'supervisor_approved'].contains(r['status'])
+                              ? Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    IconButton(tooltip: 'Approve', icon: const Icon(Icons.check_circle_outline), onPressed: () => _review(r, 'approve')),
+                                    IconButton(tooltip: 'Return', icon: const Icon(Icons.undo), onPressed: () => _review(r, 'return')),
+                                  ],
+                                )
+                              : null,
+                        ),
+                    ],
+                  ),
+                ),
+              if ((p['documents'] as List? ?? const []).isNotEmpty)
+                SectionCard(
+                  title: 'Documents',
+                  child: Column(
+                    children: [
+                      for (final d in (p['documents'] as List).cast<Map>())
+                        ListTile(
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                          leading: const Icon(Icons.description_outlined),
+                          title: Text('${d['original_name']}'),
+                          subtitle: Text('${d['stage']} · ${d['uploaded_by_name'] ?? ''} · ${d['created_at']}'),
+                          trailing: IconButton(
+                            tooltip: 'Download',
+                            icon: const Icon(Icons.download),
+                            onPressed: () => app.openExport('/api/research/documents/${d['id']}').catchError((e) {
+                              if (context.mounted) showError(context, e);
+                            }),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              SectionCard(
+                title: 'History and digital signatures',
+                child: Column(
+                  children: [
+                    for (final e in (p['events'] as List).reversed)
+                      ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(e['footprint'] != null ? Icons.verified_outlined : Icons.history, color: e['footprint'] != null ? Colors.green.shade700 : null),
+                        title: Text('${e['actor_name'] ?? 'eCampus'} ${e['action']} · ${e['stage']}'),
+                        subtitle: Text([if (e['note'] != null) '${e['note']}', '${e['created_at']}', if (e['footprint'] != null) 'Signature ${e['footprint']}'].join('\n')),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+String _lowerFirst(String t) => t.isEmpty ? t : t[0].toLowerCase() + t.substring(1);
+
+/// "Step 3 of 7: Progress reports".
+String _stepLine(Map p) {
+  final g = p['guide'] as Map?;
+  if (g == null) return '${p['status_label']}';
+  final step = (g['step'] as num?)?.toInt() ?? 0;
+  return step >= 1 && step <= 7 ? 'Step $step of 7: ${g['title']}' : '${g['title']}';
+}
+
+/// The seven steps with who acts at each; the current one highlighted.
+class _StepsCard extends StatelessWidget {
+  const _StepsCard({required this.steps});
+  final List<Map> steps;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return SectionCard(
+      title: 'The steps',
+      child: Column(
+        children: [
+          for (final st in steps)
+            ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: CircleAvatar(
+                radius: 13,
+                backgroundColor: st['state'] == 'done'
+                    ? Colors.green.shade600
+                    : st['state'] == 'current'
+                    ? scheme.primary
+                    : scheme.surfaceContainerHighest,
+                child: st['state'] == 'done' ? const Icon(Icons.check, size: 15, color: Colors.white) : Text('${st['n']}', style: TextStyle(fontSize: 12, color: st['state'] == 'current' ? scheme.onPrimary : scheme.onSurfaceVariant)),
+              ),
+              title: Text('${st['title']}', style: TextStyle(fontWeight: st['state'] == 'current' ? FontWeight.w700 : FontWeight.w500)),
+              subtitle: Text(st['state'] == 'current' ? '${st['detail'] ?? st['who']}\n${st['text']}' : '${st['detail'] ?? st['who']}'),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// "How it works": the set-up the HoD does first and the seven steps, with who acts at each.
+class HowItWorksCard extends StatefulWidget {
+  const HowItWorksCard({super.key});
+
+  @override
+  State<HowItWorksCard> createState() => _HowItWorksCardState();
+}
+
+class _HowItWorksCardState extends State<HowItWorksCard> {
+  bool _open = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final app = context.read<AppState>();
+    return AsyncView<Map<String, dynamic>>(
+      load: () async => await app.api.get('/api/research/process') as Map<String, dynamic>,
+      builder: (context, d, _) {
+        final steps = (d['steps'] as List).cast<Map>();
+        final coordinating = (d['coordinating'] as List? ?? const []).cast<Map>();
+        return SectionCard(
+          title: 'How the ${'${d['kind_label']}'.toLowerCase()} process works',
+          trailing: TextButton(onPressed: () => setState(() => _open = !_open), child: Text(_open ? 'Hide' : 'Show')),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (coordinating.isNotEmpty) ...[Text('You are research coordinator for ${coordinating.map((c) => c['name']).join(', ')}.', style: const TextStyle(fontWeight: FontWeight.w600)), Text('${d['coordinator_role']}'), const SizedBox(height: 8)],
+              if (!_open) Text(steps.map((st) => '${st['n']}. ${st['title']}').join('  →  ')),
+              if (_open) ...[
+                ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: const CircleAvatar(radius: 13, child: Icon(Icons.settings_outlined, size: 15)),
+                  title: Text('Before students start · ${d['setup']['who']}'),
+                  subtitle: Text('${d['setup']['text']}'),
+                ),
+                for (final st in steps)
+                  ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: CircleAvatar(radius: 13, child: Text('${st['n']}', style: const TextStyle(fontSize: 12))),
+                    title: Text('${st['title']} · ${st['who']}'),
+                    subtitle: Text('${st['text']}'),
+                  ),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// The HoD's research set-up on the phone: programmes with research, and appointing coordinators.
+class ResearchSetupView extends StatefulWidget {
+  const ResearchSetupView({super.key});
+
+  @override
+  State<ResearchSetupView> createState() => _ResearchSetupViewState();
+}
+
+class _ResearchSetupViewState extends State<ResearchSetupView> {
+  int _version = 0;
+
+  Future<void> _appoint(Map d) async {
+    final app = context.read<AppState>();
+    List staff;
+    try {
+      staff = (await app.api.get('/api/users?roles=lecturer,hod,dean&active=1') as List).where((u) => u['department_id'] == d['id']).toList();
+    } catch (e) {
+      if (mounted) showError(context, e);
+      return;
+    }
+    if (!mounted) return;
+    final taken = (d['coordinators'] as List).map((c) => c['user_id']).toSet();
+    final chosen = await showDialog<int>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: Text('Research coordinator for ${d['name']}'),
+        children: [
+          for (final u in staff.cast<Map>().where((u) => !taken.contains(u['id']))) SimpleDialogOption(onPressed: () => Navigator.pop(ctx, u['id'] as int), child: Text([u['title'], u['name']].whereType<String>().join(' '))),
+        ],
+      ),
+    );
+    if (chosen == null || !mounted) return;
+    try {
+      await app.api.post('/api/research/coordinators', {'department_id': d['id'], 'user_id': chosen});
+      if (mounted) showMessage(context, 'Research coordinator appointed; they are notified');
+      setState(() => _version++);
+    } catch (e) {
+      if (mounted) showError(context, e);
+    }
+  }
+
+  Future<void> _remove(Map c) async {
+    try {
+      await context.read<AppState>().api.delete('/api/research/coordinators/${c['id']}');
+      setState(() => _version++);
+    } catch (e) {
+      if (mounted) showError(context, e);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final app = context.read<AppState>();
+    return AsyncView<List>(
+      key: ValueKey(_version),
+      load: () async => await app.api.get('/api/research/setup') as List,
+      builder: (context, list, _) => ListView(
+        padding: const EdgeInsets.all(12),
+        children: [
+          const Text('1. Turn research on for each programme (Setup → Programmes). 2. Appoint the research coordinators who run the process.'),
+          const SizedBox(height: 10),
+          for (final d in list.cast<Map>())
             SectionCard(
-              title: 'Supervisors and mentors',
-              child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                if ((p['supervisors'] as List).isEmpty) Text('No supervisors yet', style: TextStyle(color: scheme.onSurfaceVariant)),
-                for (final s in (p['supervisors'] as List))
-                  ListTile(
-                    dense: true,
-                    contentPadding: EdgeInsets.zero,
-                    leading: const Icon(Icons.person_outline),
-                    title: Text('${s['name']}'),
-                    subtitle: Text(s['role'] == 'main' ? 'Main supervisor' : 'Co-supervisor'),
-                    trailing: actions.contains('assign_supervisor')
-                        ? IconButton(tooltip: 'Remove', icon: const Icon(Icons.close), onPressed: () => _call(() => app.api.delete('/api/research/${p['id']}/supervisors/${s['id']}'), 'Supervisor removed'))
-                        : null,
-                  ),
-                for (final m in (p['mentors'] as List))
-                  ListTile(
-                    dense: true,
-                    contentPadding: EdgeInsets.zero,
-                    leading: const Icon(Icons.handshake_outlined),
-                    title: Text('Mentor: ${m['name']}'),
-                    subtitle: Text([if (m['institution'] != null) '${m['institution']}', '${m['status']}'].join(' · ')),
-                    trailing: actions.contains('decide_mentor') && m['status'] == 'proposed'
-                        ? Row(mainAxisSize: MainAxisSize.min, children: [
-                            IconButton(tooltip: 'Confirm', icon: const Icon(Icons.check_circle_outline), onPressed: () => _call(() => app.api.post('/api/research/${p['id']}/mentors/${m['id']}/decision', {'decision': 'confirm'}), 'Mentor confirmed')),
-                            IconButton(tooltip: 'Decline', icon: const Icon(Icons.block), onPressed: () => _call(() => app.api.post('/api/research/${p['id']}/mentors/${m['id']}/decision', {'decision': 'decline'}), 'Mentor declined')),
-                          ])
-                        : null,
-                  ),
-                Wrap(spacing: 8, children: [
-                  if (actions.contains('assign_supervisor')) TextButton.icon(onPressed: () => _assignSupervisor(p), icon: const Icon(Icons.person_add_alt), label: const Text('Assign supervisor')),
-                  if (actions.contains('propose_mentor')) TextButton.icon(onPressed: () => _proposeMentor(p), icon: const Icon(Icons.group_add_outlined), label: const Text('Propose a mentor')),
-                ]),
-              ]),
-            ),
-            if ((p['reports'] as List).isNotEmpty || p['status'] == 'in_progress')
-              SectionCard(
-                title: 'Progress reports (${p['approved_reports']}/${p['reports_required']} approved)',
-                child: Column(children: [
-                  for (final r in (p['reports'] as List).cast<Map>())
-                    ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      title: Text('${r['number']}. ${r['title']}'),
-                      subtitle: Text('${r['status']}${r['hod_note'] ?? r['supervisor_note'] != null ? ' · ${r['hod_note'] ?? r['supervisor_note']}' : ''}'),
-                      trailing: actions.contains('review_report') && ['submitted', 'supervisor_approved'].contains(r['status'])
-                          ? Row(mainAxisSize: MainAxisSize.min, children: [
-                              IconButton(tooltip: 'Approve', icon: const Icon(Icons.check_circle_outline), onPressed: () => _review(r, 'approve')),
-                              IconButton(tooltip: 'Return', icon: const Icon(Icons.undo), onPressed: () => _review(r, 'return')),
-                            ])
-                          : null,
-                    ),
-                ]),
-              ),
-            if ((p['documents'] as List? ?? const []).isNotEmpty)
-              SectionCard(
-                title: 'Documents',
-                child: Column(children: [
-                  for (final d in (p['documents'] as List).cast<Map>())
+              title: '${d['name']}',
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  for (final p in (d['programs'] as List).cast<Map>()) Text('${p['code']}: ${p['research_enabled'] == true ? '${p['kind_label']} from Year ${p['research_year'] ?? 1}, ${p['research_reports']} reports' : 'research is off'}'),
+                  const SizedBox(height: 8),
+                  if ((d['coordinators'] as List).isEmpty) Text('No research coordinator yet: the HoD does the coordinator\'s steps until one is appointed.', style: TextStyle(color: Colors.orange.shade800)),
+                  for (final c in (d['coordinators'] as List).cast<Map>())
                     ListTile(
                       dense: true,
                       contentPadding: EdgeInsets.zero,
-                      leading: const Icon(Icons.description_outlined),
-                      title: Text('${d['original_name']}'),
-                      subtitle: Text('${d['stage']} · ${d['uploaded_by_name'] ?? ''} · ${d['created_at']}'),
-                      trailing: IconButton(
-                        tooltip: 'Download',
-                        icon: const Icon(Icons.download),
-                        onPressed: () => app.openExport('/api/research/documents/${d['id']}').catchError((e) {
-                          if (context.mounted) showError(context, e);
-                        }),
-                      ),
+                      leading: const Icon(Icons.manage_accounts_outlined),
+                      title: Text([c['title'], c['name']].whereType<String>().join(' ')),
+                      subtitle: const Text('Research coordinator'),
+                      trailing: d['can_appoint'] == true ? IconButton(tooltip: 'Remove', icon: const Icon(Icons.close), onPressed: () => _remove(c)) : null,
                     ),
-                ]),
+                  if (d['can_appoint'] == true)
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: TextButton.icon(onPressed: () => _appoint(d), icon: const Icon(Icons.person_add_alt), label: const Text('Appoint coordinator')),
+                    ),
+                ],
               ),
-            SectionCard(
-              title: 'History and digital signatures',
-              child: Column(children: [
-                for (final e in (p['events'] as List).reversed)
-                  ListTile(
-                    dense: true,
-                    contentPadding: EdgeInsets.zero,
-                    leading: Icon(e['footprint'] != null ? Icons.verified_outlined : Icons.history, color: e['footprint'] != null ? Colors.green.shade700 : null),
-                    title: Text('${e['actor_name'] ?? 'eCampus'} ${e['action']} · ${e['stage']}'),
-                    subtitle: Text([if (e['note'] != null) '${e['note']}', '${e['created_at']}', if (e['footprint'] != null) 'Signature ${e['footprint']}'].join('\n')),
-                  ),
-              ]),
             ),
-          ]);
-        },
+        ],
       ),
     );
   }

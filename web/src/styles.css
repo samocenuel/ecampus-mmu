@@ -645,6 +645,13 @@ select.input { padding-right: 28px; }
 
 code.footprint { font-family: ui-monospace, Consolas, monospace; font-weight: 700; color: #067647; }
 
+.process-steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+.process-steps li { display: flex; gap: 12px; align-items: flex-start; }
+.process-num { flex: none; width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 13px; background: var(--primary-soft, #e8f0fb); color: var(--primary, #1e5aa8); }
+.process-steps li.setup .process-num { background: #fef3c7; color: #92400e; }
+.research-steps li div { display: flex; flex-direction: column; line-height: 1.2; }
+.research-steps li small { font-weight: 400; color: var(--muted, #667085); font-size: 11px; }
+
 /* ---------- responsive ---------- */
 @media (max-width: 1080px) {
   .grid-2, .checkin-layout { grid-template-columns: minmax(0, 1fr); }

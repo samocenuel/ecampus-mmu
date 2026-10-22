@@ -14,6 +14,7 @@ import {
   STATUS_LABEL, STEP_LABEL, supervisorIds, tell, EVENT_MINUTES, googleCalendarLink,
 } from '../services/research.js';
 import { localToUtc } from '../services/occurrences.js';
+import { processSteps, researchGuide } from '../services/research-guide.js';
 import { badRequest, forbidden, notFound, requireFields, slugify, toInt } from '../util.js';
 
 const router = Router();
@@ -106,36 +107,33 @@ function actionsFor(user, p) {
   return a;
 }
 
-/** Who acts next, in words, for lists. */
-function waitingFor(p) {
-  const steps = {
-    concept_submitted: 'coordinator', presentation_scheduled: 'coordinator', supervision: 'hod', final_approved: 'coordinator',
-    defence_scheduled: 'coordinator', corrections_review: 'supervisor', defended: 'hod',
-  };
-  if (p.status === 'intent_review' || p.status === 'final_review') {
-    const step = nextSigner(p.id, p.status === 'intent_review' ? 'intent' : 'final');
-    return step ? STEP_LABEL[step] : null;
-  }
-  if (p.status === 'in_progress') {
-    const r = pendingReport(p.id);
-    if (r) return r.status === 'submitted' ? 'Supervisor (progress report)' : 'Head of Department (progress report)';
-    return 'Student';
-  }
-  if (['concept_returned', 'intent_approved', 'corrections'].includes(p.status)) return 'Student';
-  return steps[p.status] ? STEP_LABEL[steps[p.status]] : null;
+/** Where the work is in the seven steps, who acts next and what the viewer has to do (services/research-guide.js). */
+function guideFor(user, p, actions) {
+  const stage = p.status === 'intent_review' ? 'intent' : p.status === 'final_review' ? 'final' : null;
+  return researchGuide(p, {
+    approved: approvedReports(p.id),
+    pendingReport: p.status === 'in_progress' ? pendingReport(p.id) : null,
+    signer: stage ? nextSigner(p.id, stage) : null,
+    hasMainSupervisor: Boolean(q.get("SELECT 1 FROM research_supervisors WHERE project_id = ? AND role = 'main'", p.id)),
+    actions,
+    isStudent: user.id === p.student_id,
+  });
 }
 
 function summarise(user, p) {
   const supervisors = q.all('SELECT u.id, u.name, u.title, rs.role FROM research_supervisors rs JOIN users u ON u.id = rs.user_id WHERE rs.project_id = ? ORDER BY rs.role, u.name', p.id);
+  const actions = actionsFor(user, p);
+  const guide = guideFor(user, p, actions);
   return {
     ...p,
     kind_label: KIND_LABEL[p.kind],
     status_label: STATUS_LABEL[p.status] || p.status,
     supervisors,
     approved_reports: approvedReports(p.id),
-    waiting_for: waitingFor(p),
+    waiting_for: guide.next?.who || null,
     relation: relationOf(user, p),
-    actions: actionsFor(user, p),
+    actions,
+    guide,
   };
 }
 
@@ -160,6 +158,25 @@ function eligibility(user) {
 }
 
 router.get('/eligibility', (req, res) => res.json(eligibility(req.user)));
+
+/** The seven steps, for the "How it works" guide (the student's own kind of work, or a project). */
+router.get('/process', (req, res) => {
+  const e = req.user.role === 'student' ? eligibility(req.user) : {};
+  const kind = KIND_LABEL[req.query.kind] ? req.query.kind : e.kind || 'project';
+  res.json({
+    kind,
+    kind_label: KIND_LABEL[kind],
+    setup: {
+      who: 'Head of Department',
+      text: "Before students start, the HoD turns research on for each programme (from which year of study, and how many progress reports) and appoints the department's research coordinators. Until a coordinator is appointed, the HoD does the coordinator's steps.",
+    },
+    coordinator_role:
+      'Research coordinators receive the concepts, schedule presentations and defences, assign supervisors, confirm mentors, and sign off the intent to submit and the final work.',
+    steps: processSteps(kind, e.reports_required ?? 3),
+    // Departments the viewer coordinates research for.
+    coordinating: q.all('SELECT d.id, d.name FROM research_coordinators rc JOIN departments d ON d.id = rc.department_id WHERE rc.user_id = ?', req.user.id),
+  });
+});
 
 router.post('/', upload.single('document'), (req, res) => {
   try {
@@ -247,6 +264,40 @@ router.post('/coordinators', (req, res) => {
   q.run('INSERT OR IGNORE INTO research_coordinators (university_id, department_id, user_id, appointed_by) VALUES (?, ?, ?, ?)', req.uid, dept.id, user.id, req.user.id);
   notify(user.id, { title: `Research coordinator: ${dept.name}`, body: 'Students of the department now send you their research concepts.', type: 'research', link: '/research' });
   res.status(201).json(q.get('SELECT rc.*, u.name FROM research_coordinators rc JOIN users u ON u.id = rc.user_id WHERE rc.department_id = ? AND rc.user_id = ?', dept.id, user.id));
+});
+
+/**
+ * Research set-up per department for the HoD (and Dean / administrator): which programmes have
+ * research turned on, and who the research coordinators are. Without a coordinator the HoD acts as one.
+ */
+router.get('/setup', (req, res) => {
+  const depts = managedDepartmentIds(req.user);
+  if (depts !== null && !depts.length) throw forbidden('The HoD sets up research for the department');
+  const rows = q.all(
+    `SELECT d.id, d.name, d.hod_id, h.name AS hod_name FROM departments d LEFT JOIN users h ON h.id = d.hod_id
+      WHERE d.university_id = ? ${depts === null ? '' : `AND d.id IN (${placeholders(depts)})`} ORDER BY d.name`,
+    req.uid,
+    ...(depts || []),
+  );
+  res.json(
+    rows.map((d) => ({
+      ...d,
+      can_appoint: canAppoint(req.user, d.id),
+      coordinators: q.all(
+        'SELECT rc.id, u.id AS user_id, u.name, u.title FROM research_coordinators rc JOIN users u ON u.id = rc.user_id WHERE rc.department_id = ? ORDER BY u.name',
+        d.id,
+      ),
+      programs: q.all('SELECT id, code, name, level, research_enabled, research_year, research_reports FROM programs WHERE department_id = ? ORDER BY code', d.id).map((p) => ({
+        ...p,
+        research_enabled: Boolean(p.research_enabled),
+        kind_label: KIND_LABEL[kindForLevel(p.level)],
+      })),
+      active_projects: q.get(
+        "SELECT COUNT(*) AS n FROM research_projects rp JOIN users s ON s.id = rp.student_id LEFT JOIN classes c ON c.id = s.class_id LEFT JOIN programs p ON p.id = c.program_id WHERE p.department_id = ? AND rp.status NOT IN ('cleared','rejected')",
+        d.id,
+      ).n,
+    })),
+  );
 });
 
 router.delete('/coordinators/:id', (req, res) => {

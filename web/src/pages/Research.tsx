@@ -2,7 +2,7 @@
 // concept to clearance.
 import { FormEvent, ReactNode, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, Award, CalendarPlus, Check, Download, FileText, FileUp, Plus, Trash2, Undo2, UserPlus, X } from 'lucide-react';
+import { ArrowLeft, Award, CalendarPlus, Check, ChevronDown, ChevronUp, Download, FileText, FileUp, Plus, Settings2, Trash2, Undo2, UserPlus, X } from 'lucide-react';
 import { api, download } from '../api';
 import { useAuth } from '../auth';
 import { useFeedback } from '../components/feedback';
@@ -15,20 +15,6 @@ const niceDateTime = (d?: string | null) => (d ? new Date(d.replace(' ', 'T') + 
 /** Presentation and defence times are local times ("YYYY-MM-DD HH:MM"). */
 const localWhen = (d?: string | null) => (d ? `${niceDate(d)}${d.length > 10 ? `, ${d.slice(11, 16)}` : ''}` : '');
 
-const STEPS: [string, string][] = [
-  ['concept', 'Concept'],
-  ['presentation', 'Presentation'],
-  ['supervision', 'Supervisors'],
-  ['reports', 'Progress reports'],
-  ['intent', 'Intent to submit'],
-  ['final', 'Final submission'],
-  ['defence', 'Defence'],
-  ['cleared', 'Cleared'],
-];
-const STEP_OF: Record<string, number> = {
-  concept_submitted: 0, concept_returned: 0, presentation_scheduled: 1, supervision: 2, in_progress: 3, intent_review: 4,
-  intent_approved: 5, final_review: 5, final_approved: 6, defence_scheduled: 6, corrections: 6, corrections_review: 6, defended: 7, cleared: 8, rejected: -1,
-};
 const STATUS_TONE = (s: string): 'success' | 'danger' | 'warning' | 'info' => (s === 'cleared' ? 'success' : s === 'rejected' ? 'danger' : ['concept_returned', 'corrections'].includes(s) ? 'warning' : 'info');
 
 type FieldKey = 'date' | 'venue' | 'panel' | 'note';
@@ -203,27 +189,73 @@ function UploadModal({ project, def, onClose, onDone }: { project: any; def: Upl
 
 // ------------------------------------------------------------------ List
 
-function Coordinators() {
-  const { user } = useAuth();
+/** The seven steps, who acts at each, and the set-up the HoD does first. */
+function HowItWorks({ defaultOpen }: { defaultOpen?: boolean }) {
+  const { data } = useFetch<any>('/api/research/process');
+  const [open, setOpen] = usePersistentState<boolean>('lms_research_guide_open', Boolean(defaultOpen));
+  if (!data) return null;
+  return (
+    <Card
+      title={`How the ${data.kind_label.toLowerCase()} process works`}
+      actions={
+        <Button size="sm" variant="ghost" icon={open ? <ChevronUp size={14} /> : <ChevronDown size={14} />} onClick={() => setOpen(!open)}>
+          {open ? 'Hide' : 'Show the steps'}
+        </Button>
+      }
+    >
+      {data.coordinating.length > 0 && (
+        <Alert tone="info" title={`You are research coordinator for ${data.coordinating.map((d: any) => d.name).join(', ')}`}>
+          {data.coordinator_role}
+        </Alert>
+      )}
+      {open ? (
+        <ol className="process-steps">
+          <li className="setup">
+            <span className="process-num">
+              <Settings2 size={14} />
+            </span>
+            <div>
+              <strong>Before students start</strong> <span className="muted small">· {data.setup.who}</span>
+              <p className="m0 small">{data.setup.text}</p>
+            </div>
+          </li>
+          {data.steps.map((st: any) => (
+            <li key={st.n}>
+              <span className="process-num">{st.n}</span>
+              <div>
+                <strong>{st.title}</strong> <span className="muted small">· {st.who}</span>
+                <p className="m0 small">{st.text}</p>
+              </div>
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <p className="muted small m0">
+          {data.steps.map((st: any) => `${st.n}. ${st.title}`).join('  →  ')}
+        </p>
+      )}
+    </Card>
+  );
+}
+
+/** The HoD's research set-up: research on per programme, and the department's research coordinators. */
+function ResearchSetup() {
   const { fail, toast, confirm } = useFeedback();
-  const { data, reload } = useFetch<any[]>('/api/research/coordinators');
-  const { data: departments } = useFetch<any[]>('/api/departments');
+  const { data, loading, reload } = useFetch<any[]>('/api/research/setup');
   const { data: staff } = useFetch<any[]>('/api/users?roles=lecturer,hod,dean&active=1');
-  const [form, setForm] = useState({ department_id: '', user_id: '' });
-  const depts = (departments || []).filter((d) => user?.role === 'admin' || user?.role === 'dean' || d.hod_id === user?.id || d.id === user?.department_id);
-  const dept = form.department_id || String(depts[0]?.id || '');
-  const add = async () => {
+  const [pick, setPick] = useState<Record<number, string>>({});
+  const appoint = async (d: any) => {
     try {
-      await api('/api/research/coordinators', { method: 'POST', body: { department_id: dept, user_id: form.user_id } });
-      toast('Research coordinator appointed');
-      setForm({ ...form, user_id: '' });
+      await api('/api/research/coordinators', { method: 'POST', body: { department_id: d.id, user_id: pick[d.id] } });
+      toast('Research coordinator appointed; they are notified');
+      setPick({ ...pick, [d.id]: '' });
       reload();
     } catch (err) {
       fail(err);
     }
   };
   const remove = async (c: any) => {
-    if (!(await confirm({ title: `Remove ${c.name}?`, message: 'They stop receiving the department\'s research concepts.', confirmLabel: 'Remove', tone: 'danger' }))) return;
+    if (!(await confirm({ title: `Remove ${c.name} as research coordinator?`, message: "They stop receiving the department's research concepts.", confirmLabel: 'Remove', tone: 'danger' }))) return;
     try {
       await api(`/api/research/coordinators/${c.id}`, { method: 'DELETE' });
       reload();
@@ -231,26 +263,93 @@ function Coordinators() {
       fail(err);
     }
   };
+  if (loading && !data) return <Spinner />;
   return (
-    <Card title="Research coordinators" padded={false}>
-      <div className="pad-x muted small">Coordinators receive the department's concepts, schedule presentations and defences, and sign off intents and final submissions. Without one, the HoD does it.</div>
-      <DataTable
-        rows={data}
-        empty="No research coordinators yet"
-        columns={[
-          { key: 'name', header: 'Coordinator', render: (c: any) => <><strong>{[c.title, c.name].filter(Boolean).join(' ')}</strong><div className="muted small">{c.email}</div></> },
-          { key: 'department_name', header: 'Department' },
-          { key: '_a', header: '', align: 'right', render: (c: any) => <IconButton label="Remove" className="danger" onClick={() => remove(c)}><Trash2 size={16} /></IconButton> },
-        ]}
-      />
-      <div className="pad-x row gap-sm wrap" style={{ paddingBottom: 14 }}>
-        {depts.length > 1 && <Select value={dept} onChange={(e) => setForm({ ...form, department_id: e.target.value })} options={depts.map((d) => ({ value: String(d.id), label: d.name }))} />}
-        <Select value={form.user_id} placeholder="Choose a lecturer..." onChange={(e) => setForm({ ...form, user_id: e.target.value })} options={(staff || []).filter((s) => !dept || String(s.department_id) === dept).map((s) => ({ value: String(s.id), label: [s.title, s.name].filter(Boolean).join(' ') }))} />
-        <Button icon={<UserPlus size={16} />} disabled={!form.user_id} onClick={add}>
-          Appoint
-        </Button>
-      </div>
-    </Card>
+    <div className="stack">
+      {data?.map((d) => {
+        const on = d.programs.filter((p: any) => p.research_enabled);
+        return (
+          <Card key={d.id} title={d.name} actions={<span className="muted small">{d.active_projects} active</span>}>
+            <div className="grid-2 align-start">
+              <div className="stack">
+                <div className="field-label">1. Programmes with research</div>
+                {d.programs.length === 0 && <p className="muted small m0">No programmes yet.</p>}
+                {d.programs.map((p: any) => (
+                  <div key={p.id} className="metric-row">
+                    <span>
+                      <strong>{p.code}</strong> {p.name}
+                      <div className="muted small">{p.research_enabled ? `${p.kind_label} from Year ${p.research_year || 1}, ${p.research_reports} progress reports` : 'Research is off'}</div>
+                    </span>
+                    <Badge tone={p.research_enabled ? 'success' : 'neutral'}>{p.research_enabled ? 'On' : 'Off'}</Badge>
+                  </div>
+                ))}
+                <Link to="/setup/programmes" className="small">
+                  Turn research on or change it in Setup → Programmes
+                </Link>
+              </div>
+              <div className="stack">
+                <div className="field-label">2. Research coordinators</div>
+                {d.coordinators.length === 0 && (
+                  <Alert tone="warning">
+                    No research coordinator yet. Until one is appointed, {d.hod_name ? `the HoD (${d.hod_name})` : 'the HoD'} does the coordinator's steps.
+                  </Alert>
+                )}
+                {d.coordinators.map((c: any) => (
+                  <div key={c.id} className="metric-row">
+                    <span>
+                      <strong>{[c.title, c.name].filter(Boolean).join(' ')}</strong>
+                    </span>
+                    {d.can_appoint && (
+                      <IconButton label="Remove" className="danger" onClick={() => remove(c)}>
+                        <Trash2 size={16} />
+                      </IconButton>
+                    )}
+                  </div>
+                ))}
+                {d.can_appoint && (
+                  <div className="row gap-sm wrap">
+                    <Select
+                      value={pick[d.id] || ''}
+                      placeholder="Choose a lecturer..."
+                      onChange={(e) => setPick({ ...pick, [d.id]: e.target.value })}
+                      options={(staff || [])
+                        .filter((x) => x.department_id === d.id && !d.coordinators.some((c: any) => c.user_id === x.id))
+                        .map((x) => ({ value: String(x.id), label: [x.title, x.name].filter(Boolean).join(' ') }))}
+                    />
+                    <Button icon={<UserPlus size={16} />} disabled={!pick[d.id]} onClick={() => appoint(d)}>
+                      Appoint coordinator
+                    </Button>
+                  </div>
+                )}
+                <p className="muted small m0">Coordinators receive concepts, schedule presentations and defences, assign supervisors and sign off intents and final work.</p>
+              </div>
+            </div>
+            {on.length > 0 && d.coordinators.length > 0 && (
+              <p className="small m0 text-success">
+                <Check size={14} /> Ready: students of {on.map((p: any) => p.code).join(', ')} can submit concepts.
+              </p>
+            )}
+          </Card>
+        );
+      })}
+    </div>
+  );
+}
+
+/** "Step 3 of 7 · Progress reports" with who acts next. */
+function StageCell({ p }: { p: any }) {
+  const g = p.guide;
+  if (!g) return <Badge tone={STATUS_TONE(p.status)}>{p.status_label}</Badge>;
+  return (
+    <>
+      <Badge tone={g.your_turn ? 'warning' : STATUS_TONE(p.status)}>{g.step >= 1 && g.step <= 7 ? `Step ${g.step} of 7 · ${g.title}` : g.title}</Badge>
+      {g.your_turn && <Badge tone="warning">Your turn</Badge>}
+      {g.next && (
+        <div className="muted small">
+          Next: <strong>{g.next.who}</strong>, {g.next.text.charAt(0).toLowerCase() + g.next.text.slice(1)}
+        </div>
+      )}
+    </>
   );
 }
 
@@ -266,7 +365,7 @@ function ProjectTable({ rows, loading, student }: { rows?: any[]; loading: boole
       columns={[
         ...(student ? [] : [{ key: 'student_name', header: 'Student', render: (p: any) => <><strong>{p.student_name}</strong><div className="muted small">{p.student_identifier} · {p.program_code}</div></> }]),
         { key: 'title', header: 'Title', render: (p: any) => <><Badge>{p.kind_label}</Badge> {p.title}</> },
-        { key: 'status', header: 'Stage', render: (p: any) => <><Badge tone={STATUS_TONE(p.status)}>{p.status_label}</Badge>{p.waiting_for && !['cleared', 'rejected'].includes(p.status) && <div className="muted small">Waiting for: {p.waiting_for}</div>}</> },
+        { key: 'status', header: 'Where it is', sortValue: (p: any) => p.guide?.step ?? 0, render: (p: any) => <StageCell p={p} /> },
         { key: 'approved_reports', header: 'Reports', align: 'right', hideOnMobile: true, render: (p: any) => `${p.approved_reports}/${p.reports_required}` },
         { key: 'supervisors', header: 'Supervisors', hideOnMobile: true, render: (p: any) => p.supervisors.map((s: any) => s.name).join(', ') || <span className="muted">-</span> },
       ]}
@@ -274,7 +373,7 @@ function ProjectTable({ rows, loading, student }: { rows?: any[]; loading: boole
   );
 }
 
-type View = 'awaiting' | 'supervising' | 'all' | 'cleared' | 'coordinators';
+type View = 'awaiting' | 'supervising' | 'all' | 'cleared' | 'setup';
 
 export default function Research() {
   const { user } = useAuth();
@@ -284,14 +383,17 @@ export default function Research() {
   const [view, setView] = usePersistentState<View>('lms_research_view', 'awaiting');
   const [starting, setStarting] = useState(false);
   const { data: eligibility } = useFetch<any>(isStudent ? '/api/research/eligibility' : null);
-  const current = view === 'coordinators' && !manages ? 'awaiting' : view;
-  const { data, loading, error } = useFetch<any[]>(current === 'coordinators' ? null : `/api/research?view=${isStudent ? 'mine' : current}`);
+  const current = (view as string) === 'coordinators' ? 'setup' : view === 'setup' && !manages ? 'awaiting' : view;
+  const { data, loading, error } = useFetch<any[]>(current === 'setup' && !isStudent ? null : `/api/research?view=${isStudent ? 'mine' : current}`);
+  const { data: setup } = useFetch<any[]>(manages ? '/api/research/setup' : null);
+  const noCoordinator = (setup || []).filter((d) => d.can_appoint && d.coordinators.length === 0 && d.programs.some((p: any) => p.research_enabled));
+  const nothingOn = setup && setup.length > 0 && setup.every((d) => !d.programs.some((p: any) => p.research_enabled));
   const tabs: { value: View; label: string }[] = [
     { value: 'awaiting', label: 'Awaiting me' },
     { value: 'supervising', label: 'I supervise' },
     { value: 'all', label: 'All' },
     { value: 'cleared', label: 'Cleared' },
-    ...(manages ? [{ value: 'coordinators' as View, label: 'Coordinators' }] : []),
+    ...(manages ? [{ value: 'setup' as View, label: 'Set-up & coordinators' }] : []),
   ];
 
   return (
@@ -303,14 +405,25 @@ export default function Research() {
       />
       <ErrorNote error={error} />
       {isStudent && eligibility && !eligibility.eligible && !data?.length && <Alert tone="info">{eligibility.reason}</Alert>}
-      {isStudent && eligibility?.eligible && (
-        <Alert tone="info" title={`Your ${eligibility.kind_label.toLowerCase()}`}>
-          Submit a concept to {eligibility.coordinators?.length ? eligibility.coordinators.map((c: any) => [c.title, c.name].filter(Boolean).join(' ')).join(', ') : 'your department\'s research coordinator'}. After the presentation, supervisors are assigned; then you submit {eligibility.reports_required} progress report{eligibility.reports_required === 1 ? '' : 's'}, your intent to submit, the final work and defend it.
+      {isStudent && eligibility?.eligible && !data?.length && (
+        <Alert tone="info" title={`Start your ${eligibility.kind_label.toLowerCase()}`} action={<Button icon={<Plus size={16} />} onClick={() => setStarting(true)}>Submit a concept</Button>}>
+          Step 1 is your concept. It goes to {eligibility.coordinators?.length ? eligibility.coordinators.map((c: any) => [c.title, c.name].filter(Boolean).join(' ')).join(', ') : "your Head of Department (no research coordinator is appointed yet)"}.
         </Alert>
       )}
+      {manages && nothingOn && current !== 'setup' && (
+        <Alert tone="warning" title="Research is not set up yet" action={<Button size="sm" onClick={() => setView('setup')}>Set up research</Button>}>
+          Turn research on for your programmes and appoint a research coordinator.
+        </Alert>
+      )}
+      {manages && !nothingOn && noCoordinator.length > 0 && current !== 'setup' && (
+        <Alert tone="warning" title={`No research coordinator in ${noCoordinator.map((d) => d.name).join(', ')}`} action={<Button size="sm" onClick={() => setView('setup')}>Appoint a coordinator</Button>}>
+          Until you appoint one, you do the coordinator's steps (presentations, supervisors, sign-offs and defences).
+        </Alert>
+      )}
+      <HowItWorks defaultOpen={isStudent} />
       {!isStudent && <Tabs value={current} onChange={setView} tabs={tabs} />}
-      {current === 'coordinators' && !isStudent ? (
-        <Coordinators />
+      {current === 'setup' && !isStudent ? (
+        <ResearchSetup />
       ) : (
         <Card padded={false}>
           <ProjectTable rows={data ?? undefined} loading={loading} student={isStudent} />
@@ -498,7 +611,7 @@ export function ResearchDetail() {
   if (loading && !p) return <Spinner />;
   if (error) return <ErrorNote error={error} />;
   if (!p) return null;
-  const step = STEP_OF[p.status] ?? 0;
+  const g = p.guide;
   const uploads = UPLOADS(p.kind_label);
   const stageButtons: ReactNode[] = [];
   for (const a of p.actions as string[]) {
@@ -529,21 +642,29 @@ export function ResearchDetail() {
         }
       />
       {p.status !== 'rejected' && (
-        <ol className="stepper claim-steps">
-          {STEPS.map(([key, label], i) => (
-            <li key={key} className={i < step ? 'done' : i === step ? 'current' : ''}>
-              <span>{i < step ? <Check size={13} /> : i + 1}</span>
-              {label}
+        <ol className="stepper claim-steps research-steps">
+          {g.steps.map((st: any) => (
+            <li key={st.n} className={st.state === 'done' ? 'done' : st.state === 'current' ? 'current' : ''} title={st.text}>
+              <span>{st.state === 'done' ? <Check size={13} /> : st.n}</span>
+              <div>
+                {st.title}
+                <small>{st.detail || st.who}</small>
+              </div>
             </li>
           ))}
         </ol>
       )}
       <div className="stack">
         {p.status === 'rejected' && <Alert tone="danger" title="Not approved">{p.outcome_note}</Alert>}
-        {p.waiting_for && !['cleared', 'rejected'].includes(p.status) && (
-          <Alert tone={stageButtons.length ? 'warning' : 'info'} title={stageButtons.length ? 'Your step' : `Waiting for: ${p.waiting_for}`} action={stageButtons.length ? <div className="row gap-sm wrap">{stageButtons}</div> : undefined}>
-            {p.status_label}
-            {p.next_signer ? `. Next to sign off: ${p.waiting_for}.` : '.'}
+        <HowItWorks />
+        {g.next && (
+          <Alert
+            tone={stageButtons.length ? 'warning' : 'info'}
+            title={stageButtons.length ? `Your step (step ${g.step} of 7: ${g.title})` : `Step ${g.step} of 7: ${g.title} · next, ${g.next.who}`}
+            action={stageButtons.length ? <div className="row gap-sm wrap">{stageButtons}</div> : undefined}
+          >
+            {g.you || `${g.next.who}: ${g.next.text}`}
+            <div className="muted small">{g.steps[g.step - 1]?.text}</div>
           </Alert>
         )}
         {p.status === 'cleared' && p.verify_code && (
@@ -588,7 +709,7 @@ export function ResearchDetail() {
                 <dd>{niceDateTime(p.submitted_at)}</dd>
               </dl>
             </Card>
-            {step >= 3 && <Reports project={p} reload={reload} />}
+            {g.step >= 3 && <Reports project={p} reload={reload} />}
             <Card title="Documents" padded={false}>
               <DataTable
                 rows={p.documents}

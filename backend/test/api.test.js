@@ -1255,3 +1255,38 @@ describe('Filtered reports, workload limits and internal part-time load', () => 
     await api('PUT', `/api/users/${esther.id}`, { token: hod, body: { designation: '', workload_max: '' } });
   });
 });
+
+describe('Research process guide and set-up', () => {
+  test('every project says its step, who acts next and what to do; the HoD sees the set-up', async () => {
+    const hod = await login('hod.cs@demo.edu');
+    const list = (await api('GET', '/api/research?view=all', { token: hod })).data;
+    assert.ok(list.length > 0);
+    for (const p of list) {
+      assert.equal(p.guide.total, 7);
+      assert.equal(p.guide.steps.length, 7);
+      if (!['cleared', 'rejected'].includes(p.status)) assert.ok(p.guide.next.who && p.guide.next.text, `${p.status} has a next step`);
+      assert.equal(p.waiting_for, p.guide.next?.who || null);
+    }
+    const concept = list.find((p) => p.status === 'concept_submitted');
+    if (concept) {
+      assert.equal(concept.guide.step, 1);
+      assert.equal(concept.guide.next.who, 'Research coordinator');
+    }
+    // The student is told they are waiting, not asked to act.
+    if (concept) {
+      const student = q.get('SELECT email FROM users WHERE id = ?', concept.student_id).email;
+      const mine = (await api('GET', `/api/research/${concept.id}`, { token: await login(student) })).data;
+      assert.equal(mine.guide.your_turn, false);
+      assert.match(mine.guide.you, /waiting for the research coordinator/);
+    }
+    const process = (await api('GET', '/api/research/process', { token: hod })).data;
+    assert.equal(process.steps.length, 7);
+    assert.match(process.setup.text, /appoints the department's research coordinators/);
+    const setup = (await api('GET', '/api/research/setup', { token: hod })).data;
+    const cs = setup.find((d) => d.name === 'Computer Science');
+    assert.equal(cs.can_appoint, true);
+    assert.ok(cs.coordinators.length >= 1);
+    assert.ok(cs.programs.some((p) => p.research_enabled));
+    assert.equal((await api('GET', '/api/research/setup', { token: await login('brian.kato@demo.edu') })).status, 403);
+  });
+});
