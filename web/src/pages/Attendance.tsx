@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, Check, CheckCheck, CircleCheck, CircleX, ClipboardList, Search, X } from 'lucide-react';
+import { ArrowLeft, Check, CheckCheck, CircleCheck, CircleX, ClipboardList, MessageSquareWarning, QrCode, Search, X } from 'lucide-react';
 import { api } from '../api';
 import { useAuth } from '../auth';
 import { useFeedback } from '../components/feedback';
@@ -14,6 +14,8 @@ import { MANAGER_ROLES, TEACHING_ROLES } from '../types';
 const STATUS_TONE: Record<string, 'warning' | 'success' | 'danger'> = { submitted: 'warning', approved: 'success', rejected: 'danger' };
 const STATUS_LABEL: Record<string, string> = { submitted: 'Awaiting approval', approved: 'Approved', rejected: 'Rejected' };
 export const StatusBadge = ({ status }: { status: string }) => <Badge tone={STATUS_TONE[status]}>{STATUS_LABEL[status] || status}</Badge>;
+const METHOD_LABEL: Record<string, string> = { qr: 'phone', manual: 'manual', correction: 'corrected', rep: 'class rep' };
+export const MethodTag = ({ method }: { method?: string | null }) => (method && METHOD_LABEL[method] ? <small className="muted"> · {METHOD_LABEL[method]}</small> : null);
 
 const localToday = () => {
   const d = new Date();
@@ -187,7 +189,7 @@ export function RegisterReview({ id, onDone, onClose }: { id: number; onDone?: (
             {data.class_name} · {niceDate(data.lecture_date)} · {data.start_time}-{data.end_time} · {data.room_name}
           </div>
           <div className="muted small">
-            Submitted by {data.submitted_by_name || '-'} {data.topic ? `· Topic: ${data.topic}` : ''} {data.note ? `· Note: ${data.note}` : ''}
+            Submitted by {data.submitted_by_name || '-'} {data.topic ? `· Topic: ${data.topic}` : ''} {data.note ? `· Note: ${data.note}` : ''} {data.source === 'qr' ? `· QR check-in: ${data.self_checkins} scanned by phone` : ''}
           </div>
         </div>
         <StatusBadge status={data.status} />
@@ -203,7 +205,7 @@ export function RegisterReview({ id, onDone, onClose }: { id: number; onDone?: (
           <ul className="name-list">
             {present.map((s: any) => (
               <li key={s.id}>
-                <CircleCheck size={15} className="text-success" /> {s.name} <small className="muted">{s.identifier}</small>
+                <CircleCheck size={15} className="text-success" /> {s.name} <small className="muted">{s.identifier}</small><MethodTag method={s.method} />
               </li>
             ))}
           </ul>
@@ -238,7 +240,17 @@ export function RegisterReview({ id, onDone, onClose }: { id: number; onDone?: (
 }
 
 function SessionsForDate({ role }: { role: 'rep' | 'lecturer' }) {
+  const navigate = useNavigate();
+  const { fail } = useFeedback();
   const [date, setDate] = useState(localToday());
+  const startCheckin = async (i: any) => {
+    try {
+      const r = await api('/api/checkin/start', { method: 'POST', body: { session_id: i.session.id, date } });
+      navigate(`/checkin/${r.id}`);
+    } catch (err) {
+      fail(err);
+    }
+  };
   const { data, loading, error, reload } = useFetch<any>(`/api/attendance/sessions?date=${date}`);
   const [open, setOpen] = useState<any>(null);
   const [review, setReview] = useState<number | null>(null);
@@ -257,12 +269,22 @@ function SessionsForDate({ role }: { role: 'rep' | 'lecturer' }) {
           key={`${i.session.id}-${i.class_id}`}
           s={i.session}
           showClasses={role === 'lecturer'}
-          onClick={() => (role === 'rep' ? setOpen(i) : i.register && setReview(i.register.id))}
+          onClick={() => (role === 'rep' ? (i.checkin ? navigate(`/checkin/${i.checkin.id}`) : setOpen(i)) : i.register && setReview(i.register.id))}
           extra={
             <div className="session-extra">
               {role === 'lecturer' && <small className="muted">{i.class_name}</small>}
               {i.register ? <StatusBadge status={i.register.status} /> : i.not_started ? <Badge>Not started</Badge> : <Badge tone="info">Not taken</Badge>}
-              {role === 'rep' && i.can_submit && !i.register && <Button size="sm">Take</Button>}
+              {i.checkin && (
+                <Button size="sm" variant={i.checkin.open ? 'success' : 'secondary'} icon={<QrCode size={14} />} onClick={(e) => { e.stopPropagation(); navigate(`/checkin/${i.checkin.id}`); }}>
+                  {i.checkin.open ? 'QR check-in open' : 'QR check-in'}
+                </Button>
+              )}
+              {role === 'lecturer' && !i.checkin && !i.register && date === localToday() && !i.not_started && (
+                <Button size="sm" icon={<QrCode size={14} />} onClick={(e) => { e.stopPropagation(); startCheckin(i); }}>
+                  Start check-in
+                </Button>
+              )}
+              {role === 'rep' && i.can_submit && !i.register && !i.checkin && <Button size="sm">Take</Button>}
             </div>
           }
         />
@@ -326,8 +348,98 @@ function RegisterList({ status, title }: { status?: string; title: string }) {
   );
 }
 
+function Corrections() {
+  const { fail, toast } = useFeedback();
+  const { data, loading, error, reload } = useFetch<any[]>('/api/attendance/corrections');
+  const [deciding, setDeciding] = useState<{ c: any; action: 'approve' | 'reject' } | null>(null);
+  const [note, setNote] = useState('');
+  const decide = async () => {
+    try {
+      await api(`/api/attendance/corrections/${deciding!.c.id}/review`, { method: 'POST', body: { action: deciding!.action, note } });
+      toast(deciding!.action === 'approve' ? 'Marked present' : 'Correction rejected');
+      setDeciding(null);
+      setNote('');
+      reload();
+    } catch (err) {
+      fail(err);
+    }
+  };
+  return (
+    <Card title="Correction requests" padded={false}>
+      <ErrorNote error={error} />
+      <DataTable
+        rows={data}
+        loading={loading}
+        searchKeys={['student_name', 'student_identifier', 'course_code', 'class_name']}
+        empty="No correction requests"
+        columns={[
+          { key: 'student_name', header: 'Student', render: (c: any) => <><strong>{c.student_name}</strong><div className="muted small">{c.student_identifier} · {c.class_name}</div></> },
+          { key: 'lecture_date', header: 'Lecture', render: (c: any) => <><strong>{c.course_code}</strong> {niceDate(c.lecture_date)}<div className="muted small">{c.start_time}-{c.end_time}</div></> },
+          { key: 'note', header: 'Student says', render: (c: any) => <span className="small">{c.note}</span> },
+          {
+            key: 'status',
+            header: '',
+            align: 'right',
+            render: (c: any) =>
+              c.status === 'submitted' ? (
+                <div className="row-actions">
+                  <Button size="sm" variant="success" onClick={() => setDeciding({ c, action: 'approve' })}>Mark present</Button>
+                  <Button size="sm" variant="ghost" onClick={() => setDeciding({ c, action: 'reject' })}>Reject</Button>
+                </div>
+              ) : (
+                <><StatusBadge status={c.status} />{c.reviewed_by_name && <div className="muted small">{c.reviewed_by_name}</div>}</>
+              ),
+          },
+        ]}
+      />
+      {deciding && (
+        <Modal
+          open
+          title={deciding.action === 'approve' ? `Mark ${deciding.c.student_name} present?` : 'Reject this correction?'}
+          onClose={() => setDeciding(null)}
+          footer={<><Button variant="secondary" onClick={() => setDeciding(null)}>Cancel</Button><Button variant={deciding.action === 'approve' ? 'success' : 'danger'} disabled={deciding.action === 'reject' && !note.trim()} onClick={decide}>{deciding.action === 'approve' ? 'Mark present' : 'Reject'}</Button></>}
+        >
+          <p className="m0">"{deciding.c.note}"</p>
+          <Field label={deciding.action === 'reject' ? 'Reason *' : 'Note (optional)'}>
+            <Textarea value={note} onChange={(e) => setNote(e.target.value)} />
+          </Field>
+        </Modal>
+      )}
+    </Card>
+  );
+}
+
+function RequestCorrection({ record, onClose, onDone }: { record: any; onClose: () => void; onDone: () => void }) {
+  const { fail, toast } = useFeedback();
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const send = async () => {
+    setBusy(true);
+    try {
+      await api('/api/attendance/corrections', { method: 'POST', body: { register_id: record.register_id, note } });
+      toast('Request sent to your lecturer');
+      onDone();
+      onClose();
+    } catch (err) {
+      fail(err);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Modal open title={`${record.course_code} on ${niceDate(record.lecture_date)}`} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>Cancel</Button><Button loading={busy} disabled={note.trim().length < 5} onClick={send}>Send request</Button></>}>
+      <p className="muted m0">You are marked absent. If you attended but could not check in (flat battery, no network), tell your lecturer. Requests are accepted for a short time after the lecture.</p>
+      <Field label="What happened? *">
+        <Textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. My phone battery died; I sat in the front row" />
+      </Field>
+    </Modal>
+  );
+}
+
 function MyAttendance() {
-  const { data, loading, error } = useFetch<any>('/api/attendance/my-history');
+  const { data, loading, error, reload } = useFetch<any>('/api/attendance/my-history');
+  const [correcting, setCorrecting] = useState<any>(null);
+  const recent = (d: string) => (Date.now() - new Date(`${d}T12:00:00`).getTime()) / 86400000 <= 3;
   if (loading && !data) return <Spinner />;
   if (error) return <ErrorNote error={error} />;
   if (!data) return null;
@@ -368,11 +480,27 @@ function MyAttendance() {
             { key: 'lecture_date', header: 'Date', render: (r) => niceDate(r.lecture_date) },
             { key: 'start_time', header: 'Time', render: (r) => `${r.start_time}-${r.end_time}`, hideOnMobile: true },
             { key: 'course_code', header: 'Course unit', render: (r) => <><strong>{r.course_code}</strong> <span className="muted hide-sm">{r.course_name}</span></> },
-            { key: 'present', header: 'Attendance', render: (r) => (r.present ? <Badge tone="success">Present</Badge> : <Badge tone="danger">Absent</Badge>) },
+            { key: 'present', header: 'Attendance', render: (r) => (r.present ? <><Badge tone="success">Present</Badge><MethodTag method={r.method} /></> : <Badge tone="danger">Absent</Badge>) },
             { key: 'status', header: 'Register', render: (r) => <StatusBadge status={r.status} />, hideOnMobile: true },
+            {
+              key: '_c',
+              header: '',
+              align: 'right',
+              render: (r: any) =>
+                r.correction_status ? (
+                  <Badge tone={r.correction_status === 'approved' ? 'success' : r.correction_status === 'rejected' ? 'danger' : 'warning'}>Correction {r.correction_status === 'submitted' ? 'pending' : r.correction_status}</Badge>
+                ) : (
+                  !r.present && recent(r.lecture_date) && (
+                    <Button size="sm" variant="ghost" icon={<MessageSquareWarning size={14} />} onClick={() => setCorrecting(r)}>
+                      I was there
+                    </Button>
+                  )
+                ),
+            },
           ]}
         />
       </Card>
+      {correcting && <RequestCorrection record={correcting} onClose={() => setCorrecting(null)} onDone={reload} />}
     </div>
   );
 }
@@ -387,6 +515,7 @@ export default function Attendance() {
     ...(isRep ? [{ value: 'take', label: 'Take attendance' }] : []),
     ...(teaches ? [{ value: 'lectures', label: 'My lectures' }] : []),
     ...(teaches || manages ? [{ value: 'approvals', label: 'Approvals' }] : []),
+    ...(teaches || manages ? [{ value: 'corrections', label: 'Corrections' }] : []),
     ...(teaches || manages || isRep ? [{ value: 'registers', label: isRep && !teaches ? 'Submitted registers' : 'All registers' }] : []),
     ...(user!.role === 'student' ? [{ value: 'mine', label: 'My attendance' }] : []),
   ];
@@ -412,6 +541,7 @@ export default function Attendance() {
         {tab === 'lectures' && <SessionsForDate role="lecturer" />}
         {tab === 'approvals' && <RegisterList status="submitted" title="Waiting for approval" />}
         {tab === 'registers' && <RegisterList title="Registers" />}
+        {tab === 'corrections' && <Corrections />}
         {tab === 'mine' && <MyAttendance />}
       </div>
     </>

@@ -300,6 +300,228 @@ CREATE TABLE IF NOT EXISTS pay_claim_events (
 CREATE INDEX IF NOT EXISTS idx_pay_events_claim ON pay_claim_events(claim_id);
 `;
 
+// Teaching operations and exams: QR check-in, attendance corrections, lecture changes, the
+// academic calendar, leave with cover lecturers, exam timetables, coursework marks and budgets.
+const OPS_SCHEMA = `
+CREATE TABLE IF NOT EXISTS student_devices (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  device_id TEXT NOT NULL UNIQUE,
+  registered_at TEXT NOT NULL DEFAULT (datetime('now')),
+  changed_in_term_id INTEGER REFERENCES academic_terms(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS checkin_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  university_id INTEGER NOT NULL REFERENCES universities(id) ON DELETE CASCADE,
+  session_id INTEGER NOT NULL REFERENCES timetable_sessions(id) ON DELETE CASCADE,
+  lecture_date TEXT NOT NULL,
+  secret TEXT NOT NULL,
+  started_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  started_at TEXT NOT NULL DEFAULT (datetime('now')),
+  closed_at TEXT,
+  closed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  UNIQUE (session_id, lecture_date)
+);
+
+CREATE TABLE IF NOT EXISTS checkins (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  checkin_session_id INTEGER NOT NULL REFERENCES checkin_sessions(id) ON DELETE CASCADE,
+  student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  class_id INTEGER NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+  method TEXT NOT NULL CHECK (method IN ('qr','manual')),
+  device_id TEXT,
+  reason TEXT,
+  marked_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  latitude REAL,
+  longitude REAL,
+  scanned_at TEXT NOT NULL DEFAULT (datetime('now')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (checkin_session_id, student_id)
+);
+-- One phone checks in one student per lecture.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_checkins_device ON checkins(checkin_session_id, device_id) WHERE method = 'qr';
+
+CREATE TABLE IF NOT EXISTS checkin_flags (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  university_id INTEGER NOT NULL REFERENCES universities(id) ON DELETE CASCADE,
+  checkin_session_id INTEGER REFERENCES checkin_sessions(id) ON DELETE CASCADE,
+  student_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  device_id TEXT,
+  kind TEXT NOT NULL,
+  detail TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_checkin_flags_session ON checkin_flags(checkin_session_id);
+
+CREATE TABLE IF NOT EXISTS attendance_corrections (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  university_id INTEGER NOT NULL REFERENCES universities(id) ON DELETE CASCADE,
+  register_id INTEGER NOT NULL REFERENCES attendance_registers(id) ON DELETE CASCADE,
+  student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  note TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'submitted' CHECK (status IN ('submitted','approved','rejected')),
+  reviewed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  reviewed_at TEXT,
+  review_note TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (register_id, student_id)
+);
+
+CREATE TABLE IF NOT EXISTS session_changes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  university_id INTEGER NOT NULL REFERENCES universities(id) ON DELETE CASCADE,
+  session_id INTEGER NOT NULL REFERENCES timetable_sessions(id) ON DELETE CASCADE,
+  original_date TEXT NOT NULL,
+  action TEXT NOT NULL CHECK (action IN ('cancel','move')),
+  new_date TEXT,
+  new_start TEXT,
+  new_end TEXT,
+  new_room_id INTEGER REFERENCES rooms(id) ON DELETE SET NULL,
+  reason TEXT,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (session_id, original_date)
+);
+CREATE INDEX IF NOT EXISTS idx_session_changes_new_date ON session_changes(university_id, new_date);
+
+CREATE TABLE IF NOT EXISTS calendar_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  university_id INTEGER NOT NULL REFERENCES universities(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'holiday' CHECK (kind IN ('holiday','recess','reading','exams','event')),
+  start_date TEXT NOT NULL,
+  end_date TEXT NOT NULL,
+  no_teaching INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS leave_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  university_id INTEGER NOT NULL REFERENCES universities(id) ON DELETE CASCADE,
+  lecturer_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL,
+  faculty_id INTEGER REFERENCES faculties(id) ON DELETE SET NULL,
+  start_date TEXT NOT NULL,
+  end_date TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'submitted' CHECK (status IN ('submitted','hod_checked','approved','rejected','cancelled')),
+  hod_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  hod_at TEXT,
+  hod_note TEXT,
+  dean_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  dean_at TEXT,
+  dean_note TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS leave_covers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  leave_id INTEGER NOT NULL REFERENCES leave_requests(id) ON DELETE CASCADE,
+  session_id INTEGER NOT NULL REFERENCES timetable_sessions(id) ON DELETE CASCADE,
+  lecture_date TEXT NOT NULL,
+  substitute_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (session_id, lecture_date)
+);
+
+CREATE TABLE IF NOT EXISTS exams (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  university_id INTEGER NOT NULL REFERENCES universities(id) ON DELETE CASCADE,
+  term_id INTEGER NOT NULL REFERENCES academic_terms(id) ON DELETE CASCADE,
+  course_unit_id INTEGER NOT NULL REFERENCES course_units(id) ON DELETE CASCADE,
+  exam_date TEXT NOT NULL,
+  start_time TEXT NOT NULL,
+  end_time TEXT NOT NULL,
+  notes TEXT,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (term_id, course_unit_id)
+);
+CREATE INDEX IF NOT EXISTS idx_exams_date ON exams(university_id, exam_date);
+
+CREATE TABLE IF NOT EXISTS exam_rooms (
+  exam_id INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
+  room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+  seats INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (exam_id, room_id)
+);
+
+CREATE TABLE IF NOT EXISTS exam_invigilators (
+  exam_id INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  room_id INTEGER REFERENCES rooms(id) ON DELETE SET NULL,
+  PRIMARY KEY (exam_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS coursework_marks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  university_id INTEGER NOT NULL REFERENCES universities(id) ON DELETE CASCADE,
+  term_id INTEGER NOT NULL REFERENCES academic_terms(id) ON DELETE CASCADE,
+  course_unit_id INTEGER NOT NULL REFERENCES course_units(id) ON DELETE CASCADE,
+  student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  raw_mark REAL NOT NULL,
+  out_of REAL NOT NULL,
+  mark REAL NOT NULL,
+  max_mark REAL NOT NULL,
+  uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  uploaded_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (term_id, course_unit_id, student_id)
+);
+
+CREATE TABLE IF NOT EXISTS exam_overrides (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  university_id INTEGER NOT NULL REFERENCES universities(id) ON DELETE CASCADE,
+  exam_id INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
+  student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  reason TEXT NOT NULL,
+  granted_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (exam_id, student_id)
+);
+
+CREATE TABLE IF NOT EXISTS pay_budgets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  university_id INTEGER NOT NULL REFERENCES universities(id) ON DELETE CASCADE,
+  department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+  term_id INTEGER NOT NULL REFERENCES academic_terms(id) ON DELETE CASCADE,
+  amount REAL NOT NULL CHECK (amount >= 0),
+  set_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (department_id, term_id)
+);
+`;
+
+/** Columns added after a table was first created (SQLite only appends columns). */
+const ADDED_COLUMNS = {
+  universities: {
+    checkin_latitude: 'REAL',
+    checkin_longitude: 'REAL',
+    checkin_radius_m: 'INTEGER NOT NULL DEFAULT 0',
+    manual_mark_limit: 'INTEGER NOT NULL DEFAULT 3',
+    correction_hours: 'INTEGER NOT NULL DEFAULT 48',
+    exam_min_attendance: 'INTEGER NOT NULL DEFAULT 75',
+    coursework_min_percent: 'INTEGER NOT NULL DEFAULT 50',
+    claims_require_checkin: 'INTEGER NOT NULL DEFAULT 0',
+  },
+  users: { calendar_token: 'TEXT', must_change_password: 'INTEGER NOT NULL DEFAULT 0', photo_path: 'TEXT' },
+  programs: { coursework_max: 'REAL NOT NULL DEFAULT 40' },
+  attendance_registers: { source: "TEXT NOT NULL DEFAULT 'rep'", self_checkins: 'INTEGER NOT NULL DEFAULT 0' },
+  attendance_records: { method: 'TEXT' },
+  pay_rates: { code: 'TEXT' },
+  pay_claim_lines: { exam_id: 'INTEGER REFERENCES exams(id) ON DELETE SET NULL', self_checkins: 'INTEGER' },
+};
+
+function addColumns() {
+  for (const [table, columns] of Object.entries(ADDED_COLUMNS)) {
+    const have = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name));
+    for (const [name, type] of Object.entries(columns)) {
+      if (!have.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
+    }
+  }
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS ux_users_calendar_token ON users(calendar_token) WHERE calendar_token IS NOT NULL');
+}
+
 /** Brings databases created by earlier versions up to the current schema. */
 function migrate() {
   const usersSql = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'").get()?.sql || '';
@@ -352,6 +574,8 @@ function migrate() {
 db.exec(SCHEMA);
 migrate();
 db.exec(PAY_SCHEMA);
+db.exec(OPS_SCHEMA);
+addColumns();
 
 // node:sqlite only binds null/number/bigint/string/bytes, so normalise JS values first.
 const bindable = (params) =>

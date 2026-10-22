@@ -2,7 +2,8 @@ import { ReactNode, useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   Bell, BookOpen, Building2, CalendarClock, CalendarDays, ChartColumn, ClipboardCheck, DoorOpen, GraduationCap,
-  KeyRound, Landmark, Layers, LayoutDashboard, LogOut, Menu, Network, School, Settings, UserCog, Users, Wallet, Workflow, X,
+  CalendarRange, CalendarX2, FilePenLine, KeyRound, Landmark, Layers, LayoutDashboard, LogOut, Menu, Network, School, Settings, UserCog, Users, Wallet,
+  Workflow, X,
 } from 'lucide-react';
 import { api, assetUrl } from '../api';
 import { useAuth } from '../auth';
@@ -34,6 +35,8 @@ const NAV: { section: string; items: NavItem[] }[] = [
       { to: '/allocation', label: 'Load allocation', icon: <Workflow size={18} />, roles: ['admin', 'dean', 'hod'] },
       { to: '/timetable', label: 'Timetable', icon: <CalendarClock size={18} />, roles: ['admin', 'dean', 'hod', 'lecturer'] },
       { to: '/reports', label: 'Reports', icon: <ChartColumn size={18} />, roles: ['admin', 'dean', 'hod', 'lecturer'] },
+      { to: '/exams', label: 'Exams', icon: <FilePenLine size={18} />, roles: ['admin', 'dean', 'hod', 'lecturer', 'student'] },
+      { to: '/leave', label: 'Leave', icon: <CalendarX2 size={18} />, roles: ['admin', 'dean', 'hod', 'lecturer'] },
     ],
   },
   {
@@ -58,6 +61,7 @@ const NAV: { section: string; items: NavItem[] }[] = [
       { to: '/setup/classes', label: 'Classes', icon: <School size={18} />, roles: ['admin', 'dean', 'hod'] },
       { to: '/setup/rooms', label: 'Rooms', icon: <DoorOpen size={18} />, roles: ['admin'] },
       { to: '/setup/terms', label: 'Academic terms', icon: <Layers size={18} />, roles: ['admin'] },
+      { to: '/setup/calendar', label: 'Academic calendar', icon: <CalendarRange size={18} />, roles: ['admin'] },
       { to: '/users', label: 'Users', icon: <Users size={18} />, roles: ['admin', 'dean', 'hod'] },
     ],
   },
@@ -169,7 +173,7 @@ function UserMenu() {
   return (
     <div className="user-menu" ref={ref}>
       <button className="user-chip" onClick={() => setOpen((o) => !o)}>
-        <Avatar name={user.name} />
+        <Avatar name={user.name} src={assetUrl(user.photo_url)} />
         <span className="hide-sm user-chip-text">
           <strong>{user.name}</strong>
           <small>

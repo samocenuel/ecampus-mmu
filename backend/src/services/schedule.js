@@ -2,7 +2,10 @@ import { config } from '../config.js';
 import { q } from '../db.js';
 import { currentTerm, placeholders } from '../scope.js';
 import { addDays, dowOf, toMinutes, zonedNow } from '../util.js';
+import { autoCloseCheckins } from './checkin.js';
 import { notify } from './notify.js';
+import { occurrences, occurrencesForUser } from './occurrences.js';
+import { runMissedLectureAlerts } from './ops.js';
 import { listSessions } from './timetable.js';
 
 /** Weekly sessions relevant to a user: what they teach (staff) or attend (students). */
@@ -20,35 +23,28 @@ export function notificationPrefs(userId) {
 /** Concrete lecture occurrences for the next `days` days, in the university's local time. */
 export function upcomingForUser(user, days = 7) {
   const uni = q.get('SELECT timezone FROM universities WHERE id = ?', user.university_id);
-  const term = currentTerm(user.university_id);
   const prefs = notificationPrefs(user.id);
   const base = { timezone: uni?.timezone || 'UTC', enabled: Boolean(prefs.enabled), minutes_before: prefs.minutes_before, items: [] };
-  if (!term) return base;
-  const sessions = sessionsForUser(user, term.id);
   const now = zonedNow(base.timezone);
-  for (let i = 0; i < days; i++) {
-    const date = addDays(now.date, i);
-    if (term.start_date && date < term.start_date) continue;
-    if (term.end_date && date > term.end_date) break;
-    const dow = dowOf(date);
-    for (const s of sessions) {
-      if (s.day_of_week !== dow) continue;
-      if (i === 0 && toMinutes(s.end_time) <= now.minutes) continue;
-      base.items.push({
-        session_id: s.id,
-        date,
-        start_time: s.start_time,
-        end_time: s.end_time,
-        starts_at_local: `${date}T${s.start_time}:00`,
-        in_progress: i === 0 && toMinutes(s.start_time) <= now.minutes,
-        course_code: s.course_code,
-        course_name: s.course_name,
-        room_name: s.room_name,
-        room_building: s.room_building,
-        lecturer_name: s.lecturer_name,
-        classes: s.classes,
-      });
-    }
+  for (const o of occurrencesForUser(user, now.date, addDays(now.date, days - 1))) {
+    if (o.date === now.date && toMinutes(o.end_time) <= now.minutes) continue;
+    base.items.push({
+      session_id: o.session_id,
+      date: o.date,
+      start_time: o.start_time,
+      end_time: o.end_time,
+      starts_at_local: `${o.date}T${o.start_time}:00`,
+      in_progress: o.date === now.date && toMinutes(o.start_time) <= now.minutes,
+      course_code: o.course_code,
+      course_name: o.course_name,
+      room_name: o.room_name,
+      room_building: o.room_building,
+      lecturer_name: o.lecturer_name,
+      classes: o.classes,
+      status: o.status,
+      covered: o.covered,
+      original_date: o.original_date || null,
+    });
   }
   return base;
 }
@@ -66,7 +62,7 @@ export function runReminders(at = new Date()) {
     const now = zonedNow(uni.timezone, at);
     if ((term.start_date && now.date < term.start_date) || (term.end_date && now.date > term.end_date)) continue;
 
-    for (const s of listSessions(uni.id, term.id, { day: now.dow })) {
+    for (const s of occurrences(uni.id, { from: now.date, to: now.date })) {
       const until = toMinutes(s.start_time) - now.minutes;
       if (until <= 0 || until > 120) continue;
       const classIds = s.classes.map((c) => c.id);
@@ -84,7 +80,7 @@ export function runReminders(at = new Date()) {
           body: `${s.course_name} - ${s.start_time} to ${s.end_time} in ${s.room_name}${s.room_building ? `, ${s.room_building}` : ''}`,
           type: 'reminder',
           link: '/my-timetable',
-          dedupeKey: `reminder:${s.id}:${now.date}`,
+          dedupeKey: `reminder:${s.session_id}:${now.date}`,
         });
       }
     }
@@ -93,11 +89,18 @@ export function runReminders(at = new Date()) {
 }
 
 export function startReminderLoop() {
+  let ticks = 0;
   const tick = () => {
     try {
       runReminders();
     } catch (err) {
       console.error('[reminders]', err);
+    }
+    try {
+      for (const uni of q.all('SELECT id, timezone FROM universities WHERE active = 1')) autoCloseCheckins(uni.id, zonedNow(uni.timezone));
+      if (ticks++ % 10 === 0) runMissedLectureAlerts();
+    } catch (err) {
+      console.error('[operations]', err);
     }
   };
   tick();

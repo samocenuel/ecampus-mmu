@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'api.dart';
+import 'checkin_service.dart';
 import 'notifications.dart';
 
 /// Servers earlier versions used by default; saved copies of them are replaced on start.
@@ -59,6 +60,9 @@ class AppState extends ChangeNotifier {
   bool get isPartTimer => teaches && user?['employment_type'] == 'part_time';
   /// HoDs, Deans, HR and admins take part in approving part-time pay claims.
   bool get approvesClaims => const ['admin', 'dean', 'hod', 'hr'].contains(role);
+  /// Accounts created by an administrator must choose their own password first.
+  bool get mustChangePassword => user?['must_change_password'] == true;
+  String? get photoUrl => api.absolute(user?['photo_url'] as String?);
   Color get seedColor => hexColor(university?['primary_color'] as String?);
   String? get logoUrl => api.absolute(university?['logo_url'] as String?);
 
@@ -124,6 +128,11 @@ class AppState extends ChangeNotifier {
     await _acceptSession(session as Map<String, dynamic>);
   }
 
+  void setUser(Map<String, dynamic> u) {
+    user = u;
+    notifyListeners();
+  }
+
   void setUniversity(Map<String, dynamic> u) {
     university = u;
     notifyListeners();
@@ -163,6 +172,8 @@ class AppState extends ChangeNotifier {
 
   Future<void> _checkNotifications() async {
     if (api.token == null) return;
+    // Check-in scans made without a connection are sent once the phone is back online.
+    if (isStudent) unawaited(CheckinService.instance.flush(api).catchError((_) => <ScanResult>[]));
     try {
       final res = await api.get('/api/notifications?limit=10') as Map<String, dynamic>;
       final items = (res['items'] as List).cast<Map<String, dynamic>>();

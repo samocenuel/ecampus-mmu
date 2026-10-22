@@ -4,6 +4,7 @@ import { hashPassword, requireRole, STAFF_ROLES } from '../auth.js';
 import { insert, q, tx, update } from '../db.js';
 import { isProtectedDemoAccount } from '../demo.js';
 import { canManageDepartment, userScope } from '../scope.js';
+import { notify } from '../services/notify.js';
 import { badRequest, forbidden, notFound, pick, requireFields, toInt, truthy } from '../util.js';
 import { isEmail, validatePassword } from './auth.js';
 
@@ -19,6 +20,8 @@ const MANAGEABLE = {
 export const userSelect = `
   SELECT u.id, u.university_id, u.name, u.email, u.role, u.employment_type, u.title, u.phone, u.identifier,
          u.faculty_id, u.department_id, u.class_id, u.active, u.created_at,
+         CASE WHEN u.photo_path IS NOT NULL THEN '/uploads/' || u.photo_path END AS photo_url,
+         (SELECT 1 FROM student_devices sd WHERE sd.user_id = u.id) IS NOT NULL AS has_device,
          f.name AS faculty_name, d.name AS department_name, c.name AS class_name,
          (SELECT COUNT(*) FROM classes rc WHERE rc.class_rep_id = u.id) > 0 AS is_class_rep
     FROM users u
@@ -131,6 +134,17 @@ router.get('/:id', requireRole(...STAFF_ROLES), (req, res) => {
   res.json(user);
 });
 
+/** Lets a student who changed phones check in from the new one. */
+router.post('/:id/reset-device', requireRole('admin', 'dean', 'hod'), (req, res) => {
+  const target = q.get(`${userSelect} WHERE u.id = ? AND u.university_id = ?`, req.params.id, req.uid);
+  if (!target) throw notFound('User');
+  if (target.role !== 'student') throw badRequest('Only students register a phone for check-in');
+  assertCanManage(req.user, target);
+  q.run('DELETE FROM student_devices WHERE user_id = ?', target.id);
+  notify(target.id, { title: 'Phone reset for check-in', body: 'The next phone you check in with becomes your registered phone.', type: 'security' });
+  res.json({ ok: true });
+});
+
 router.post('/', requireRole('admin', 'dean', 'hod'), (req, res) => {
   requireFields(req.body, ['name', 'email', 'role']);
   const data = resolveOrg(req.uid, normalise(req.body));
@@ -141,7 +155,8 @@ router.post('/', requireRole('admin', 'dean', 'hod'), (req, res) => {
   validatePassword(password);
 
   const id = tx(() => {
-    const uid = insert('users', { ...data, university_id: req.uid, password_hash: hashPassword(password) });
+    // Whoever created the account knows the password, so the owner replaces it at first sign-in.
+    const uid = insert('users', { ...data, university_id: req.uid, password_hash: hashPassword(password), must_change_password: 1 });
     autoAppoint(uid, data);
     return uid;
   });
@@ -167,6 +182,7 @@ router.put('/:id', requireRole('admin', 'dean', 'hod'), (req, res) => {
   if (req.body.password) {
     validatePassword(req.body.password);
     data.password_hash = hashPassword(req.body.password);
+    data.must_change_password = 1;
   }
   tx(() => {
     if ('class_id' in data && data.class_id !== existing.class_id) {
@@ -228,6 +244,7 @@ router.post('/import', requireRole('admin', 'dean', 'hod'), (req, res) => {
       }
       const id = insert('users', {
         ...base,
+        must_change_password: 1,
         university_id: req.uid,
         name,
         email: email.toLowerCase(),

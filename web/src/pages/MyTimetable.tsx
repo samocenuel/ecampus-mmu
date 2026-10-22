@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { BellRing, FileSpreadsheet, FileText, LayoutGrid, List } from 'lucide-react';
+import { BellRing, CalendarPlus, FileSpreadsheet, FileText, LayoutGrid, List } from 'lucide-react';
 import { download } from '../api';
 import { useAuth } from '../auth';
 import { useFeedback } from '../components/feedback';
+import { CalendarSync, UpcomingLectures } from '../components/Lectures';
 import { Agenda, WeekGrid } from '../components/WeekGrid';
 import { Button, Card, EmptyState, ErrorNote, PageHeader, Spinner, Tabs } from '../components/ui';
 import { useFetch, usePersistentState } from '../hooks';
@@ -39,6 +40,7 @@ export default function MyTimetable() {
   const [view, setView] = usePersistentState<'week' | 'list'>('lms_tt_view', window.innerWidth < 720 ? 'list' : 'week');
   const todayDow = ((new Date().getDay() + 6) % 7) + 1;
   const isStudent = user?.role === 'student';
+  const [sync, setSync] = useState(false);
 
   return (
     <>
@@ -50,11 +52,17 @@ export default function MyTimetable() {
             <Link to="/notifications" className="btn btn-ghost">
               <BellRing size={16} /> <span>Reminders</span>
             </Link>
+            <Button variant="secondary" icon={<CalendarPlus size={16} />} onClick={() => setSync(true)}>
+              Add to my calendar
+            </Button>
             <ExportButtons query="mine=1" label="my-timetable" />
           </>
         }
       />
       <ErrorNote error={error} />
+      {sync && <CalendarSync onClose={() => setSync(false)} />}
+      <div className="stack">
+      <UpcomingLectures />
       {loading && !data && <Spinner />}
       {data && (
         <Card
@@ -84,6 +92,7 @@ export default function MyTimetable() {
           )}
         </Card>
       )}
+      </div>
     </>
   );
 }

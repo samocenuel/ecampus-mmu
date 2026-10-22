@@ -8,6 +8,10 @@
 import { pathToFileURL } from 'node:url';
 import { hashPassword } from './auth.js';
 import { db, insert, q, tx } from './db.js';
+import crypto from 'node:crypto';
+import { generateExams } from './services/exams.js';
+import { occurrences } from './services/occurrences.js';
+import { suggestSlots } from './services/ops.js';
 import { recalcTotal, refreshTeachingLines } from './services/pay.js';
 import { generateTimetable } from './services/timetable.js';
 import { addDays, dowOf, toMinutes, zonedNow } from './util.js';
@@ -21,6 +25,8 @@ const rand = () => ((seed = (seed * 1664525 + 1013904223) % 4294967296) / 429496
 
 function wipe() {
   for (const t of [
+    'pay_budgets', 'exam_overrides', 'coursework_marks', 'exam_invigilators', 'exam_rooms', 'exams', 'leave_covers', 'leave_requests',
+    'calendar_events', 'session_changes', 'attendance_corrections', 'checkin_flags', 'checkins', 'checkin_sessions', 'student_devices',
     'pay_claim_events', 'pay_claim_lines', 'pay_claims', 'pay_rates',
     'notifications', 'notification_prefs', 'attendance_records', 'attendance_registers', 'timetable_sessions',
     'allocation_classes', 'allocations', 'program_course_units', 'course_units', 'classes', 'programs',
@@ -273,36 +279,48 @@ export function seedDemo({ quiet = false, ownerPassword = DEMO_PASSWORD } = {}) 
 
     seedPay({ uni, today: now.date, hrId, deans: structure.map((f) => lecturer[f.dean[1]]), lecturer });
     log('Part-time pay: rates and sample claims');
+    seedOps({ uni, today: now.date, historyEnd: now.date });
+    log('Calendar, changes, leave, exams, coursework and check-ins');
     return { university_id: uni, term_id: term1 };
   });
 }
 
 /**
- * Adds features introduced after a hosted demo was first seeded (currently part-time pay) to the
- * existing Demo University, leaving every other tenant untouched. Safe to run on every start.
+ * Adds features introduced after a hosted demo was first seeded (part-time pay, then teaching
+ * operations and exams) to the existing Demo University, leaving every other tenant untouched.
+ * Each step runs once, so this is safe on every start.
  */
 export function upgradeDemo({ quiet = false } = {}) {
   const uni = q.get("SELECT id FROM universities WHERE slug = 'demo-university'");
-  if (!uni || q.get("SELECT 1 FROM users WHERE email = 'hr@demo.edu'")) return false;
-  return tx(() => {
-    const hrId = insert('users', {
-      university_id: uni.id, name: 'Harriet Nansubuga', email: 'hr@demo.edu', role: 'hr', title: 'Ms.', identifier: 'HR-001',
-      password_hash: hashPassword(DEMO_PASSWORD),
-    });
-    if (!q.get('SELECT 1 FROM pay_rates WHERE university_id = ?', uni.id)) {
-      const lecturer = Object.fromEntries(
-        q.all("SELECT id, name FROM users WHERE university_id = ? AND role IN ('lecturer', 'hod', 'dean')", uni.id).map((u) => [u.name, u.id]),
-      );
-      const deans = q.all('SELECT dean_id FROM faculties WHERE university_id = ? ORDER BY id', uni.id).map((f) => f.dean_id);
-      // Date the sample claims from the demo's own attendance history.
-      const last = q.get('SELECT MAX(lecture_date) AS d FROM attendance_registers WHERE university_id = ?', uni.id).d;
-      if (['Esther Atim', 'Linda Auma', 'Joan Akello'].every((n) => lecturer[n])) {
-        seedPay({ uni: uni.id, today: last ? addDays(last, 1) : zonedNow(TZ).date, hrId, deans, lecturer });
+  if (!uni) return false;
+  let changed = false;
+  // Date the samples from the demo's own attendance history.
+  const last = q.get('SELECT MAX(lecture_date) AS d FROM attendance_registers WHERE university_id = ?', uni.id)?.d;
+  if (!q.get("SELECT 1 FROM users WHERE email = 'hr@demo.edu'")) {
+    tx(() => {
+      const hrId = insert('users', {
+        university_id: uni.id, name: 'Harriet Nansubuga', email: 'hr@demo.edu', role: 'hr', title: 'Ms.', identifier: 'HR-001',
+        password_hash: hashPassword(DEMO_PASSWORD),
+      });
+      if (!q.get('SELECT 1 FROM pay_rates WHERE university_id = ?', uni.id)) {
+        const lecturer = Object.fromEntries(
+          q.all("SELECT id, name FROM users WHERE university_id = ? AND role IN ('lecturer', 'hod', 'dean')", uni.id).map((u) => [u.name, u.id]),
+        );
+        const deans = q.all('SELECT dean_id FROM faculties WHERE university_id = ? ORDER BY id', uni.id).map((f) => f.dean_id);
+        if (['Esther Atim', 'Linda Auma', 'Joan Akello'].every((n) => lecturer[n])) {
+          seedPay({ uni: uni.id, today: last ? addDays(last, 1) : zonedNow(TZ).date, hrId, deans, lecturer });
+        }
       }
-    }
+    });
+    changed = true;
     if (!quiet) console.log('Demo upgraded with part-time pay');
-    return true;
-  });
+  }
+  if (!q.get('SELECT 1 FROM calendar_events WHERE university_id = ?', uni.id)) {
+    tx(() => seedOps({ uni: uni.id, today: zonedNow(TZ).date, historyEnd: last || zonedNow(TZ).date }));
+    changed = true;
+    if (!quiet) console.log('Demo upgraded with calendar, leave, exams and check-ins');
+  }
+  return changed;
 }
 
 const periodTitle = (from, to) => {
@@ -365,6 +383,117 @@ function seedPay({ uni, today, hrId, deans, lecturer }) {
   insert('notifications', { user_id: hod, title: 'Part-time claim to approve', body: 'Ms. Esther Atim has submitted a teaching claim.', type: 'claim', link: `/claims/${toHod}` });
   insert('notifications', { user_id: deans[0], title: 'Part-time claim to approve', body: 'Ms. Linda Auma: approved by the HoD.', type: 'claim', link: `/claims/${toDean}` });
   insert('notifications', { user_id: hrId, title: 'Claim to check', body: 'Ms. Joan Akello: approved by the Dean.', type: 'claim', link: `/claims/${toHr}` });
+}
+
+/** Academic calendar, lecture changes, leave, exams, coursework, QR check-ins and budgets. */
+function seedOps({ uni, today, historyEnd }) {
+  const term = q.get('SELECT * FROM academic_terms WHERE university_id = ? AND is_current = 1', uni);
+  if (!term) return;
+  const userId = (email) => q.get('SELECT id FROM users WHERE email = ?', email)?.id;
+  const byName = (name) => q.get('SELECT * FROM users WHERE university_id = ? AND name = ?', uni, name);
+
+  // Coursework totals per programme (set by HoDs): BIT marks coursework out of 30, the rest out of 40.
+  q.run("UPDATE programs SET coursework_max = 30 WHERE university_id = ? AND code = 'BIT'", uni);
+  q.run("UPDATE pay_rates SET code = 'invigilation' WHERE university_id = ? AND name = 'Invigilation'", uni);
+
+  // Academic calendar: reading week, exam weeks and public holidays still to come this term.
+  const examStart = addDays(term.end_date, -11);
+  const event = (title, kind, from, to, noTeaching = 1) => insert('calendar_events', { university_id: uni, title, kind, start_date: from, end_date: to, no_teaching: noTeaching });
+  event('Reading week', 'reading', addDays(examStart, -7), addDays(examStart, -3));
+  event('End-of-semester examinations', 'exams', examStart, term.end_date);
+  for (let y = Number(today.slice(0, 4)); y <= Number(term.end_date.slice(0, 4)); y++) {
+    for (const [title, md] of [["New Year's Day", '01-01'], ['Labour Day', '05-01'], ["Heroes' Day", '06-09'], ['Independence Day', '10-09'], ['Christmas Day', '12-25'], ['Boxing Day', '12-26']]) {
+      const d = `${y}-${md}`;
+      if (d > today && d >= term.start_date && d <= term.end_date) event(title, 'holiday', d, d);
+    }
+  }
+
+  // Next week: one lecture cancelled and one moved (with students notified).
+  const nextWeek = occurrences(uni, { from: addDays(today, 7), to: addDays(today, 13) });
+  const brian = byName('Brian Kato');
+  const cancel = nextWeek.find((o) => o.course_code === 'CSC1101');
+  if (cancel) {
+    insert('session_changes', { university_id: uni, session_id: cancel.session_id, original_date: cancel.date, action: 'cancel', reason: 'Lecturer presenting at the national ICT conference', created_by: brian?.id });
+  }
+  const move = nextWeek.find((o) => o.course_code === 'CSC1102');
+  if (move) {
+    const slot = suggestSlots(uni, move, { from: addDays(move.date, 1) })[0];
+    if (slot) {
+      insert('session_changes', {
+        university_id: uni, session_id: move.session_id, original_date: move.date, action: 'move', new_date: slot.date, new_start: slot.start_time,
+        new_end: slot.end_time, new_room_id: slot.room_id, reason: 'The usual room is needed for a guest lecture', created_by: move.lecturer_id,
+      });
+    }
+  }
+
+  // Leave: one waiting for the CS HoD to check, one checked and waiting for the FST Dean.
+  const ivan = byName('Ivan Ssemwogerere');
+  const joel = byName('Joel Byaruhanga');
+  const hodIt = userId('hod.it@demo.edu');
+  if (ivan) {
+    const id = insert('leave_requests', { university_id: uni, lecturer_id: ivan.id, department_id: ivan.department_id, faculty_id: ivan.faculty_id, start_date: addDays(today, 14), end_date: addDays(today, 20), reason: 'Attending a research workshop in Nairobi', status: 'submitted' });
+    insert('notifications', { user_id: userId('hod.cs@demo.edu'), title: 'Leave request: Ivan Ssemwogerere', body: 'Research workshop; lectures need cover.', type: 'leave', link: `/leave/${id}` });
+  }
+  if (joel) {
+    const id = insert('leave_requests', {
+      university_id: uni, lecturer_id: joel.id, department_id: joel.department_id, faculty_id: joel.faculty_id, start_date: addDays(today, 9), end_date: addDays(today, 10),
+      reason: 'Family medical appointment', status: 'hod_checked', hod_by: hodIt, hod_at: `${today} 07:30:00`, hod_note: 'Cover arranged within the department.',
+    });
+    insert('notifications', { user_id: userId('dean.fst@demo.edu'), title: 'Leave to approve: Joel Byaruhanga', body: 'Checked by the HoD.', type: 'leave', link: `/leave/${id}` });
+  }
+
+  // Exam timetable for the exam weeks.
+  generateExams(uni, term.id, { startDate: examStart, endDate: term.end_date });
+
+  // Coursework marks out of 100, converted to each programme's total; a few missing or below half.
+  const units = q.all('SELECT DISTINCT course_unit_id FROM allocations WHERE term_id = ? AND university_id = ?', term.id, uni);
+  for (const { course_unit_id } of units) {
+    const classes = q.all('SELECT DISTINCT ac.class_id FROM allocations a JOIN allocation_classes ac ON ac.allocation_id = a.id WHERE a.term_id = ? AND a.course_unit_id = ?', term.id, course_unit_id).map((r) => r.class_id);
+    if (!classes.length) continue;
+    const students = q.all(`SELECT u.id, p.coursework_max FROM users u JOIN classes c ON c.id = u.class_id JOIN programs p ON p.id = c.program_id WHERE u.role = 'student' AND u.class_id IN (${classes.map(() => '?').join(',')})`, ...classes);
+    students.forEach((st, i) => {
+      if (i % 9 === 8) return;
+      const raw = i % 7 === 6 ? 30 + Math.round(rand() * 15) : 52 + Math.round(rand() * 40);
+      insert('coursework_marks', { university_id: uni, term_id: term.id, course_unit_id, student_id: st.id, raw_mark: raw, out_of: 100, mark: Math.round((raw / 100) * st.coursework_max * 100) / 100, max_mark: st.coursework_max });
+    });
+  }
+
+  // The last week of lectures was recorded by QR check-in: every student present scanned their own phone.
+  const recent = q.all(
+    `SELECT r.session_id, r.lecture_date, s.start_time, s.end_time, a.lecturer_id FROM attendance_registers r
+       JOIN timetable_sessions s ON s.id = r.session_id JOIN allocations a ON a.id = s.allocation_id
+      WHERE r.university_id = ? AND r.status = 'approved' AND r.lecture_date BETWEEN ? AND ?
+      GROUP BY r.session_id, r.lecture_date`,
+    uni,
+    addDays(historyEnd, -6),
+    historyEnd,
+  );
+  for (const o of recent) {
+    const csId = insert('checkin_sessions', {
+      university_id: uni, session_id: o.session_id, lecture_date: o.lecture_date, secret: crypto.randomBytes(16).toString('hex'),
+      started_by: o.lecturer_id, started_at: `${o.lecture_date} ${o.start_time}:00`, closed_at: `${o.lecture_date} ${o.end_time}:00`, closed_by: o.lecturer_id,
+    });
+    for (const reg of q.all('SELECT id, class_id FROM attendance_registers WHERE session_id = ? AND lecture_date = ?', o.session_id, o.lecture_date)) {
+      const present = q.all('SELECT student_id FROM attendance_records WHERE register_id = ? AND present = 1', reg.id).map((r) => r.student_id);
+      for (const sid of present) {
+        q.run('INSERT OR IGNORE INTO student_devices (user_id, device_id, registered_at) VALUES (?, ?, ?)', sid, `demo-phone-${sid}`, `${o.lecture_date} 07:00:00`);
+        insert('checkins', { checkin_session_id: csId, student_id: sid, class_id: reg.class_id, method: 'qr', device_id: `demo-phone-${sid}`, scanned_at: `${o.lecture_date} ${o.start_time}:05` });
+      }
+      q.run("UPDATE attendance_records SET method = CASE WHEN present = 1 THEN 'qr' END WHERE register_id = ?", reg.id);
+      q.run("UPDATE attendance_registers SET source = 'qr', self_checkins = ? WHERE id = ?", present.length, reg.id);
+    }
+  }
+  q.run(
+    `UPDATE pay_claim_lines SET self_checkins = (SELECT COUNT(*) FROM checkins ch JOIN checkin_sessions cs ON cs.id = ch.checkin_session_id
+        WHERE cs.session_id = pay_claim_lines.session_id AND cs.lecture_date = pay_claim_lines.work_date AND ch.method = 'qr')
+      WHERE kind = 'teaching' AND claim_id IN (SELECT id FROM pay_claims WHERE university_id = ?)`,
+    uni,
+  );
+
+  // Part-time budgets for this term.
+  for (const d of q.all('SELECT id, code FROM departments WHERE university_id = ?', uni)) {
+    insert('pay_budgets', { university_id: uni, department_id: d.id, term_id: term.id, amount: d.code === 'CS' ? 2000000 : 1500000, set_by: q.get('SELECT dean_id FROM faculties f JOIN departments x ON x.faculty_id = f.id WHERE x.id = ?', d.id)?.dean_id });
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

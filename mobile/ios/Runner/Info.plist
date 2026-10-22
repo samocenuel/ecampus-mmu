@@ -26,6 +26,8 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<key>NSCameraUsageDescription</key>
+	<string>eCampus uses the camera to scan the QR code shown in your lecture so you can check in.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Choose an image to upload, such as your university logo.</string>
 	<key>NSAppleMusicUsageDescription</key>

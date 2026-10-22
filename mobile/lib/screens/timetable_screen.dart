@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../core/api.dart';
 import '../core/app_state.dart';
 import '../widgets/common.dart';
+import 'lectures_screen.dart';
 import 'home_shell.dart';
 
 enum _View { mine, all, classView, lecturer, room }
@@ -184,6 +185,12 @@ class _TimetableScreenState extends State<TimetableScreen> {
               PopupMenuItem(value: 'xlsx', child: ListTile(leading: Icon(Icons.table_view_outlined), title: Text('Export Excel'))),
             ],
           ),
+          if (app.teaches || app.isStudent)
+            IconButton(
+              tooltip: 'Upcoming lectures and changes',
+              icon: const Icon(Icons.event_repeat_outlined),
+              onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const UpcomingLecturesScreen())),
+            ),
           if (app.isAdmin) IconButton(tooltip: 'Generate', icon: const Icon(Icons.auto_fix_high), onPressed: _generate),
         ],
       ),

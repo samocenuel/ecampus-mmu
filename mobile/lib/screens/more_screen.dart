@@ -9,6 +9,9 @@ import 'manage/resource_screen.dart';
 import 'manage/specs.dart';
 import 'manage/university_screen.dart';
 import 'claims_screen.dart';
+import 'exams_screen.dart';
+import 'leave_screen.dart';
+import 'lectures_screen.dart';
 import 'profile_screen.dart';
 import 'reports_screen.dart';
 
@@ -35,7 +38,7 @@ class MoreScreen extends StatelessWidget {
           margin: const EdgeInsets.all(12),
           child: ListTile(
             contentPadding: const EdgeInsets.all(12),
-            leading: CircleAvatar(radius: 26, backgroundColor: scheme.primaryContainer, child: Text((user['name'] as String).substring(0, 1), style: TextStyle(fontSize: 22, color: scheme.onPrimaryContainer))),
+            leading: const UserAvatar(),
             title: Text('${user['title'] ?? ''} ${user['name']}'.trim(), style: const TextStyle(fontWeight: FontWeight.w700)),
             subtitle: Text([
               [roleLabels[user['role']], if (app.isPartTimer) 'Part-time'].whereType<String>().join(' · '),
@@ -45,6 +48,13 @@ class MoreScreen extends StatelessWidget {
             onTap: () => open(const ProfileScreen()),
           ),
         ),
+        if (app.isStudent || app.teaches) ...[
+          header('Lectures & exams'),
+          tile(Icons.event_repeat_outlined, 'Upcoming lectures', () => open(const UpcomingLecturesScreen()), subtitle: app.teaches ? 'Check-in, cancel or move a lecture' : 'Changes and cancellations'),
+          tile(Icons.event_available_outlined, 'Add to my calendar', () => showCalendarSync(context), subtitle: 'Google, Apple or Outlook calendar'),
+        ],
+        if (app.isStudent || app.isStaff) tile(Icons.assignment_outlined, 'Exams', () => open(const ExamsScreen()), subtitle: app.isStudent ? 'Timetable and whether you qualify' : 'Invigilation and eligibility'),
+        if (app.teaches || app.isManager) tile(Icons.beach_access_outlined, 'Leave', () => open(const LeaveScreen()), subtitle: app.isManager ? 'Requests, checks and cover' : 'Request short-term leave'),
         if (app.isStaff) ...[
           header('Teaching'),
           tile(Icons.insights_outlined, 'Reports', () => open(const ReportsScreen()), subtitle: app.isManager ? 'Your unit' : 'Your teaching'),

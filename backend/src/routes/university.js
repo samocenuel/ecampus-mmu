@@ -30,6 +30,24 @@ export function validateUniversityFields(fields) {
     out.currency = String(out.currency).toUpperCase();
     if (!/^[A-Z]{3}$/.test(out.currency)) throw badRequest('Currency must be a 3-letter code such as UGX');
   }
+  const intIn = (k, min, max, label) => {
+    if (out[k] === undefined) return;
+    const n = Number(out[k]);
+    if (!Number.isInteger(n) || n < min || n > max) throw badRequest(`${label} must be a whole number from ${min} to ${max}`);
+    out[k] = n;
+  };
+  intIn('checkin_radius_m', 0, 20000, 'Check-in radius (m)');
+  intIn('manual_mark_limit', 0, 100, 'Manual marks per term');
+  intIn('correction_hours', 1, 720, 'Correction window (hours)');
+  intIn('exam_min_attendance', 0, 100, 'Minimum attendance for exams (%)');
+  intIn('coursework_min_percent', 0, 100, 'Minimum coursework mark (%)');
+  if (out.claims_require_checkin !== undefined) out.claims_require_checkin = out.claims_require_checkin ? 1 : 0;
+  for (const [k, lim] of [['checkin_latitude', 90], ['checkin_longitude', 180]]) {
+    if (out[k] === undefined) continue;
+    if (out[k] === '' || out[k] === null) out[k] = null;
+    else if (!(Math.abs(Number(out[k])) <= lim)) throw badRequest('Enter the campus location as decimal latitude and longitude');
+    else out[k] = Number(out[k]);
+  }
   if (out.timezone !== undefined) {
     try {
       new Intl.DateTimeFormat('en', { timeZone: out.timezone });
@@ -61,6 +79,8 @@ router.put('/', requireRole('admin'), (req, res) => {
   const fields = validateUniversityFields(
     pick(req.body, [
       'name', 'short_name', 'address', 'email', 'phone', 'website', 'primary_color', 'timezone', 'currency',
+      'checkin_latitude', 'checkin_longitude', 'checkin_radius_m', 'manual_mark_limit', 'correction_hours',
+      'exam_min_attendance', 'coursework_min_percent', 'claims_require_checkin',
       'teaching_days', 'day_start', 'day_end', 'lunch_start', 'lunch_end',
     ]),
   );

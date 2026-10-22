@@ -512,3 +512,239 @@ describe('Part-time pay claims', () => {
     assert.equal((await api('GET', '/api/users', { token: hr })).status, 403, 'HR only handles claims');
   });
 });
+
+describe('Teaching operations, exams and profiles', async () => {
+  const { startCheckin, currentCode } = await import('../src/services/checkin.js');
+  const { occurrences } = await import('../src/services/occurrences.js');
+  const ExcelJS = (await import('exceljs')).default;
+  const uniId = () => q.get("SELECT id FROM universities WHERE slug = 'demo-university'").id;
+  const today = () => zonedNow('Africa/Kampala').date;
+  const bscs1 = () => q.get("SELECT id FROM classes WHERE name = 'BSCS Year 1'").id;
+  const userByEmail = (email) => q.get('SELECT * FROM users WHERE email = ?', email);
+
+  /** The next BSCS Year 1 lecture of a course unit at least `days` ahead. */
+  const nextLecture = (code, days = 7) =>
+    occurrences(uniId(), { from: addDays(today(), days), to: addDays(today(), days + 13), classId: bscs1() }).find((o) => o.course_code === code);
+
+  test('QR check-in: one phone per student per lecture, one automatic phone change per term, manual marks and closing', async () => {
+    const occ = nextLecture('CSC1101');
+    const lecturer = userByEmail('brian.kato@demo.edu');
+    const cs = startCheckin(lecturer, occ);
+    const { code } = currentCode(cs);
+    const [student, rep] = await Promise.all(['student.bscs1@students.demo.edu', 'rep.bscs1@students.demo.edu'].map(login));
+    const classmates = q.all("SELECT id, email FROM users WHERE class_id = ? AND role = 'student' ORDER BY id", bscs1());
+    // Start from phones nobody has registered (the demo registers phones for recent check-ins).
+    q.run('DELETE FROM student_devices WHERE user_id IN (SELECT id FROM users WHERE class_id = ?)', bscs1());
+
+    const scan = (token, device, c = code) => api('POST', '/api/checkin/scan', { token, body: { code: c, device_id: device } });
+    assert.equal((await scan(student, 'phone-brian-0001')).status, 200);
+    assert.equal((await scan(student, 'phone-brian-0001')).data.already, true, 'scanning twice is harmless');
+    const borrowed = await scan(rep, 'phone-brian-0001');
+    assert.equal(borrowed.status, 403, 'a classmate cannot use the same phone');
+    assert.equal(borrowed.data.code, 'device_belongs_to_other');
+    assert.equal((await scan(rep, 'phone-aisha-0001')).status, 200);
+    assert.equal((await scan(student, 'phone-brian-0001', `EC1.${cs.id}.123.forged`)).status, 400, 'forged or old codes fail');
+
+    // Phone change: allowed once per term automatically, then needs the HoD.
+    const other = classmates.find((c) => !['student.bscs1@students.demo.edu', 'rep.bscs1@students.demo.edu'].includes(c.email));
+    q.run('UPDATE users SET email = ? WHERE id = ?', 'third.bscs1@students.demo.edu', other.id);
+    const third = await login('third.bscs1@students.demo.edu');
+    const lecture2 = startCheckin(lecturer, nextLecture('CSC1101', 14));
+    assert.equal((await scan(third, 'old-phone-third', code)).status, 200);
+    assert.equal((await scan(third, 'new-phone-third', currentCode(lecture2).code)).data.phone_changed, true);
+    const lecture3 = startCheckin(lecturer, nextLecture('CSC1101', 21));
+    assert.equal((await scan(third, 'another-phone-third', currentCode(lecture3).code)).data.code, 'device_other_account');
+    const hod = await login('hod.cs@demo.edu');
+    assert.equal((await api('POST', `/api/users/${other.id}/reset-device`, { token: hod })).status, 200);
+    assert.equal((await scan(third, 'another-phone-third', currentCode(lecture3).code)).status, 200);
+
+    // Manual marks (flat battery): the class rep can mark; past the limit the HoD is told.
+    const absent = classmates.find((c) => !q.get('SELECT 1 FROM checkins WHERE checkin_session_id = ? AND student_id = ?', cs.id, c.id));
+    const manual = await api('POST', `/api/checkin/${cs.id}/manual`, { token: rep, body: { student_id: absent.id, reason: 'Flat battery, ID card checked' } });
+    assert.equal(manual.status, 201);
+    q.run('UPDATE universities SET manual_mark_limit = 1 WHERE id = ?', uniId());
+    const lecturerToken = await login('brian.kato@demo.edu');
+    const again = await api('POST', `/api/checkin/${lecture2.id}/manual`, { token: lecturerToken, body: { student_id: absent.id, reason: 'Phone stolen' } });
+    assert.equal(again.data.over_limit, true);
+    q.run('UPDATE universities SET manual_mark_limit = 3 WHERE id = ?', uniId());
+
+    const view = (await api('GET', `/api/checkin/${cs.id}`, { token: lecturerToken })).data;
+    assert.equal(view.counts.qr, 3);
+    assert.equal(view.counts.manual, 1);
+    assert.ok(view.flags.some((f) => f.kind === 'device_belongs_to_other'));
+    assert.equal((await api('POST', `/api/checkin/${cs.id}/close`, { token: lecturerToken })).status, 200);
+    const reg = q.get('SELECT * FROM attendance_registers WHERE session_id = ? AND lecture_date = ? AND class_id = ?', occ.session_id, occ.date, bscs1());
+    assert.equal(reg.status, 'approved');
+    assert.equal(reg.source, 'qr');
+    assert.equal(reg.self_checkins, 3);
+    const methods = q.all('SELECT method FROM attendance_records WHERE register_id = ? AND present = 1', reg.id).map((r) => r.method).sort();
+    assert.deepEqual(methods, ['manual', 'qr', 'qr', 'qr']);
+
+    // A student marked absent asks for a correction within 48 hours; the lecturer approves it.
+    const missing = classmates.find((c) => !q.get('SELECT present FROM attendance_records WHERE register_id = ? AND student_id = ? AND present = 1', reg.id, c.id));
+    q.run('UPDATE users SET email = ? WHERE id = ?', 'fourth.bscs1@students.demo.edu', missing.id);
+    const fourth = await login('fourth.bscs1@students.demo.edu');
+    const corr = await api('POST', '/api/attendance/corrections', { token: fourth, body: { register_id: reg.id, note: 'I was there but my phone had no network' } });
+    assert.equal(corr.status, 201);
+    const review = await api('POST', `/api/attendance/corrections/${corr.data.id}/review`, { token: lecturerToken, body: { action: 'approve' } });
+    assert.equal(review.data.status, 'approved');
+    assert.equal(q.get('SELECT method FROM attendance_records WHERE register_id = ? AND student_id = ?', reg.id, missing.id).method, 'correction');
+
+    // A scan made while the phone was offline arrives after closing and still counts.
+    const offline = { code: currentCode(lecture2).code, scanned_at: new Date().toISOString() };
+    assert.equal((await api('POST', `/api/checkin/${lecture2.id}/close`, { token: lecturerToken })).status, 200);
+    const late = await api('POST', '/api/checkin/scan', { token: student, body: { ...offline, device_id: 'phone-brian-0001' } });
+    assert.equal(late.status, 200);
+    const lecture2Reg = q.get('SELECT id FROM attendance_registers WHERE session_id = ? AND lecture_date = ? AND class_id = ?', lecture2.session_id, lecture2.lecture_date, bscs1());
+    const me = userByEmail('student.bscs1@students.demo.edu');
+    assert.deepEqual(q.get('SELECT present, method FROM attendance_records WHERE register_id = ? AND student_id = ?', lecture2Reg.id, me.id), { present: 1, method: 'qr' });
+  });
+
+  test('lecturers cancel or move a lecture with clash checks; holidays remove lectures', async () => {
+    const ivan = userByEmail('ivan.ssemwogerere@demo.edu');
+    const lecturer = await login('ivan.ssemwogerere@demo.edu');
+    const occ = occurrences(uniId(), { from: addDays(today(), 22), to: addDays(today(), 35), lecturerId: ivan.id })[0];
+    const busy = occurrences(uniId(), { from: occ.date, to: addDays(occ.date, 6), classId: occ.classes[0].id }).find((o) => o.session_id !== occ.session_id);
+    const clash = await api('POST', '/api/ops/changes', { token: lecturer, body: { session_id: occ.session_id, date: occ.date, action: 'move', new_date: busy.date, new_start: busy.start_time, reason: 'Testing a clash' } });
+    assert.equal(clash.status, 409, 'a class cannot have two lectures at once');
+    const slots = (await api('GET', `/api/ops/sessions/${occ.session_id}/suggestions?date=${occ.date}&from=${addDays(occ.date, 1)}`, { token: lecturer })).data;
+    assert.ok(slots.length > 0);
+    const moved = await api('POST', '/api/ops/changes', { token: lecturer, body: { session_id: occ.session_id, date: occ.date, action: 'move', new_date: slots[0].date, new_start: slots[0].start_time, new_room_id: slots[0].room_id, reason: 'Clash with a faculty meeting' } });
+    assert.equal(moved.status, 201);
+    const after = occurrences(uniId(), { from: slots[0].date, to: slots[0].date, sessionId: occ.session_id })[0];
+    assert.equal(after.status, 'rescheduled');
+    assert.equal(occurrences(uniId(), { from: occ.date, to: occ.date, sessionId: occ.session_id }).filter((o) => o.date === occ.date).length, 0);
+    const student = q.get("SELECT id FROM users WHERE class_id = ? AND role = 'student' LIMIT 1", occ.classes[0].id);
+    assert.ok(q.get("SELECT 1 FROM notifications WHERE user_id = ? AND title LIKE 'Rescheduled:%'", student.id));
+
+    const admin = await login('admin@demo.edu');
+    let holiday = null;
+    for (let i = 15; i < 45 && !holiday; i++) if (occurrences(uniId(), { from: addDays(today(), i), to: addDays(today(), i) }).length) holiday = addDays(today(), i);
+    assert.ok(holiday, 'a teaching day to turn into a holiday');
+    assert.equal((await api('POST', '/api/ops/calendar-events', { token: lecturer, body: { title: 'X', start_date: holiday } })).status, 403);
+    assert.equal((await api('POST', '/api/ops/calendar-events', { token: admin, body: { title: 'Martyrs Day', start_date: holiday } })).status, 201);
+    assert.equal(occurrences(uniId(), { from: holiday, to: holiday }).length, 0);
+  });
+
+  test('leave: the HoD checks, the Dean approves, and a cover lecturer takes the lectures', async () => {
+    const ivanId = userByEmail('ivan.ssemwogerere@demo.edu').id;
+    const [hod, dean, ivan] = await Promise.all(['hod.cs@demo.edu', 'dean.fst@demo.edu', 'ivan.ssemwogerere@demo.edu'].map(login));
+    const id = q.get("SELECT id FROM leave_requests WHERE lecturer_id = ? AND status = 'submitted'", ivanId).id;
+    assert.equal((await api('POST', `/api/ops/leave/${id}/review`, { token: dean, body: { action: 'approve' } })).status, 403, 'the Dean waits for the HoD');
+    assert.equal((await api('POST', `/api/ops/leave/${id}/review`, { token: hod, body: { action: 'approve', note: 'Workload covered' } })).data.status, 'hod_checked');
+    const detail = (await api('GET', `/api/ops/leave/${id}`, { token: hod })).data;
+    const lecture = detail.lectures.find((l) => l.candidates?.length);
+    assert.ok(lecture, 'free colleagues are suggested as cover');
+    const cover = lecture.candidates[0];
+    assert.equal((await api('PUT', `/api/ops/leave/${id}/covers`, { token: hod, body: { session_id: lecture.session_id, date: lecture.date, substitute_id: cover.id } })).status, 200);
+    assert.equal((await api('POST', `/api/ops/leave/${id}/review`, { token: dean, body: { action: 'approve' } })).data.status, 'approved');
+    const theirs = occurrences(uniId(), { from: lecture.date, to: lecture.date, lecturerId: cover.id });
+    assert.ok(theirs.some((o) => o.session_id === lecture.session_id && o.covered), 'the cover lecturer now teaches it');
+    assert.ok(!occurrences(uniId(), { from: lecture.date, to: lecture.date, lecturerId: ivanId }).some((o) => o.session_id === lecture.session_id));
+    assert.ok((await api('GET', '/api/ops/leave?view=mine', { token: ivan })).data.length >= 1);
+  });
+
+  test('missed lectures are listed for the HoD and calendar feeds work by secret link', async () => {
+    const hod = await login('hod.cs@demo.edu');
+    const past = occurrences(uniId(), { from: addDays(today(), -12), to: addDays(today(), -5), classId: bscs1() })[0];
+    q.run('DELETE FROM attendance_registers WHERE session_id = ? AND lecture_date = ?', past.session_id, past.date);
+    q.run('DELETE FROM checkin_sessions WHERE session_id = ? AND lecture_date = ?', past.session_id, past.date);
+    const missed = (await api('GET', '/api/ops/missed', { token: hod })).data.items;
+    assert.ok(missed.some((m) => m.session_id === past.session_id && m.date === past.date));
+
+    const student = await login('student.bscs1@students.demo.edu');
+    const link = (await api('GET', '/api/ops/calendar-link', { token: student })).data;
+    assert.match(link.webcal, /^webcal:/);
+    const ics = await fetch(base + new URL(link.url).pathname).then((r) => r.text());
+    assert.match(ics, /BEGIN:VCALENDAR/);
+    assert.ok((ics.match(/BEGIN:VEVENT/g) || []).length > 5);
+    assert.match(ics, /Exam: /, 'exams are in the student calendar');
+    assert.equal((await fetch(`${base}/api/calendar/not-a-real-token-1234567890.ics`)).status, 404);
+  });
+
+  test('exam timetable, eligibility (75% attendance and 50% coursework) and HoD override', async () => {
+    const exams = q.all('SELECT e.*, cu.code FROM exams e JOIN course_units cu ON cu.id = e.course_unit_id');
+    assert.ok(exams.length >= 15);
+    const sameDay = q.get(
+      `SELECT ac.class_id, e.exam_date FROM exams e JOIN allocations a ON a.course_unit_id = e.course_unit_id AND a.term_id = e.term_id
+         JOIN allocation_classes ac ON ac.allocation_id = a.id GROUP BY ac.class_id, e.exam_date HAVING COUNT(DISTINCT e.id) > 1`,
+    );
+    assert.equal(sameDay, undefined, 'no class sits two exams in a day');
+    const hod = await login('hod.cs@demo.edu');
+    assert.equal((await api('POST', '/api/exams/generate', { token: hod, body: {} })).status, 403);
+
+    const exam = exams.find((e) => e.code === 'CSC1101');
+    const el = (await api('GET', `/api/exams/${exam.id}/eligibility`, { token: hod })).data;
+    assert.equal(el.thresholds.exam_min_attendance, 75);
+    assert.equal(el.thresholds.coursework_min_percent, 50);
+    const blocked = el.students.find((s) => !s.eligible);
+    assert.ok(blocked && blocked.reasons.length);
+    assert.equal((await api('POST', `/api/exams/${exam.id}/overrides`, { token: await login('brian.kato@demo.edu'), body: { student_id: blocked.id, reason: 'Medical leave' } })).status, 403, 'lecturers cannot override');
+    assert.equal((await api('POST', `/api/exams/${exam.id}/overrides`, { token: hod, body: { student_id: blocked.id, reason: 'Medical leave with a hospital letter' } })).status, 201);
+    const now = (await api('GET', `/api/exams/${exam.id}/eligibility`, { token: hod })).data.students.find((s) => s.id === blocked.id);
+    assert.equal(now.eligible, true);
+    const mine = (await api('GET', '/api/exams/mine', { token: await login('student.bscs1@students.demo.edu') })).data;
+    assert.ok(mine.exams.length > 0 && mine.exams.every((e) => e.eligibility));
+  });
+
+  test('coursework: download the template, upload marks out of any total, converted per programme', async () => {
+    const term = q.get('SELECT id FROM academic_terms WHERE is_current = 1');
+    const unit = q.get("SELECT id FROM course_units WHERE code = 'CEP2102'"); // taught to BSCS (out of 40) and BIT (out of 30)
+    const lecturer = await login('dean.fst@demo.edu');
+    const tpl = await api('GET', `/api/exams/coursework/template?term_id=${term.id}&course_unit_id=${unit.id}`, { token: lecturer });
+    assert.equal(tpl.status, 200);
+    assert.ok(tpl.type.includes('spreadsheetml'));
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(tpl.data);
+    const ws = wb.worksheets[0];
+    const regs = [];
+    ws.eachRow((row, n) => {
+      if (n > 4 && regs.length < 2) {
+        row.getCell(6).value = regs.length === 0 ? 80 : 30;
+        regs.push(String(row.getCell(1).value));
+      }
+    });
+    const form = new FormData();
+    form.append('term_id', String(term.id));
+    form.append('course_unit_id', String(unit.id));
+    form.append('out_of', '100');
+    form.append('file', new Blob([Buffer.from(await wb.xlsx.writeBuffer())]), 'marks.xlsx');
+    const up = await fetch(`${base}/api/exams/coursework/upload`, { method: 'POST', headers: { Authorization: `Bearer ${lecturer}` }, body: form }).then((r) => r.json());
+    assert.ok(up.updated >= 2, 'the template comes back with every mark, including the two changed');
+    assert.deepEqual(up.errors, []);
+    const s0 = up.students.find((s) => s.identifier === regs[0]);
+    assert.equal(s0.mark, (80 / 100) * s0.coursework_max, '80/100 becomes 32/40 or 24/30');
+    const student = await login('student.bscs1@students.demo.edu');
+    assert.equal((await api('GET', `/api/exams/coursework/template?term_id=${term.id}&course_unit_id=${unit.id}`, { token: student })).status, 403);
+  });
+
+  test('payslips, budgets, profile updates and the forced password change', async () => {
+    const hr = await login('hr@demo.edu');
+    const paid = q.get("SELECT id FROM pay_claims WHERE status = 'paid' LIMIT 1");
+    const pdf = await api('GET', `/api/claims/${paid.id}/payslip`, { token: hr });
+    assert.equal(pdf.status, 200);
+    assert.equal(pdf.type, 'application/pdf');
+    const dean = await login('dean.fst@demo.edu');
+    const budgets = (await api('GET', '/api/claims/budgets', { token: dean })).data;
+    assert.ok(budgets.departments.length === 2 && budgets.departments.every((d) => d.amount > 0 && d.can_set));
+    const cs = budgets.departments.find((d) => d.name === 'Computer Science');
+    assert.equal((await api('PUT', '/api/claims/budgets', { token: dean, body: { department_id: cs.id, term_id: budgets.term.id, amount: 100 } })).data.amount, 100);
+    const claim = (await api('GET', `/api/claims/${paid.id}`, { token: hr })).data;
+    assert.ok(claim.verification && claim.budget);
+
+    const admin = await login('admin@demo.edu');
+    const created = await api('POST', '/api/users', { token: admin, body: { name: 'New Lecturer', email: 'new.lecturer@demo.edu', role: 'lecturer', department_id: q.get("SELECT id FROM departments WHERE code = 'CS'").id } });
+    const temp = created.data.temporary_password;
+    const first = await api('POST', '/api/auth/login', { body: { email: 'new.lecturer@demo.edu', password: temp } });
+    assert.equal(first.data.user.must_change_password, true);
+    const changed = await api('POST', '/api/auth/change-password', { token: first.data.token, body: { current_password: temp, new_password: 'MyOwnPass-2026' } });
+    assert.equal(changed.data.user.must_change_password, false);
+    const prof = await api('PUT', '/api/auth/me', { token: first.data.token, body: { name: 'Dr. New Lecturer Updated', phone: '+256 700 000000' } });
+    assert.equal(prof.data.user.phone, '+256 700 000000');
+    const png = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63f8ffff3f0005fe02fea7d6a90000000049454e44ae426082', 'hex');
+    const form = new FormData();
+    form.append('photo', new Blob([png], { type: 'image/png' }), 'me.png');
+    const photo = await fetch(`${base}/api/auth/me/photo`, { method: 'POST', headers: { Authorization: `Bearer ${first.data.token}` }, body: form }).then((r) => r.json());
+    assert.match(photo.user.photo_url, /^\/uploads\/photos\//);
+  });
+});

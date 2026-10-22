@@ -3,7 +3,15 @@ import path from 'node:path';
 import ExcelJS from 'exceljs';
 import PDFDocument from 'pdfkit';
 import { config } from '../config.js';
-import { DAY_NAMES, toHHMM, toMinutes } from '../util.js';
+import { DAY_NAMES, toHHMM, toMinutes, zonedNow } from '../util.js';
+
+/** A UTC timestamp (Date or SQLite 'YYYY-MM-DD HH:MM:SS') as local 'YYYY-MM-DD HH:MM' in the university's timezone. */
+function localStamp(university, at = new Date()) {
+  const d = at instanceof Date ? at : new Date(String(at).replace(' ', 'T') + (String(at).includes('Z') ? '' : 'Z'));
+  if (Number.isNaN(d.getTime())) return String(at).slice(0, 16);
+  const z = zonedNow(university?.timezone || 'UTC', d);
+  return `${z.date} ${toHHMM(z.minutes)}`;
+}
 
 const hex = (c) => (/^#?[0-9a-f]{6}$/i.test(c || '') ? c.replace('#', '').toUpperCase() : '1E5AA8');
 
@@ -210,7 +218,7 @@ function pdfHeader(doc, university, title, subtitle) {
   doc.font('Helvetica-Bold').fontSize(16).fillColor(primary).text(university.name, x, top, { lineBreak: false });
   doc.font('Helvetica-Bold').fontSize(11).fillColor('#222222').text(title, x, top + 20, { lineBreak: false });
   doc.font('Helvetica').fontSize(8.5).fillColor('#666666').text(subtitle, x, top + 34, { lineBreak: false });
-  const stamp = `Generated ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`;
+  const stamp = `Generated ${localStamp(university)}`;
   doc.fontSize(8).text(stamp, doc.page.width - doc.page.margins.right - 200, top, { width: 200, align: 'right' });
   return top + 52;
 }
@@ -389,4 +397,152 @@ export async function claimsXlsx(university, title, claims, lines) {
     })),
   );
   return Buffer.from(await wb.xlsx.writeBuffer());
+}
+
+/** Examination timetable as a spreadsheet: one row per exam room. */
+export async function examsXlsx(university, title, exams) {
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet('Exams');
+  const primary = hex(university.primary_color);
+  ws.addRow([`${university.name} - ${title}`]).font = { bold: true, size: 13 };
+  ws.addRow([]);
+  const columns = [['Date', 12], ['Day', 11], ['Time', 13], ['Code', 10], ['Course unit', 32], ['Classes', 30], ['Students', 10], ['Room', 18], ['Seats', 8], ['Invigilators', 34]];
+  const head = ws.addRow(columns.map(([h]) => h));
+  head.eachCell((cell) => {
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: `FF${primary}` } };
+    cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  });
+  columns.forEach(([, w], i) => {
+    ws.getColumn(i + 1).width = w;
+  });
+  for (const e of exams) {
+    const day = DAY_NAMES[new Date(`${e.exam_date}T12:00:00Z`).getUTCDay() || 7];
+    const rooms = e.rooms.length ? e.rooms : [{ name: '-', seats: '' }];
+    rooms.forEach((r, i) => {
+      ws.addRow([
+        i ? '' : e.exam_date,
+        i ? '' : day,
+        i ? '' : `${e.start_time}-${e.end_time}`,
+        i ? '' : e.course_code,
+        i ? '' : e.course_name,
+        i ? '' : e.classes.map((c) => c.name).join(', '),
+        i ? '' : e.students,
+        r.name,
+        r.seats,
+        e.invigilators.filter((p) => p.room_id === r.id || (!p.room_id && i === 0)).map((p) => p.name).join(', '),
+      ]);
+    });
+  }
+  return Buffer.from(await wb.xlsx.writeBuffer());
+}
+
+export function examsPdf(university, title, exams) {
+  const primary = `#${hex(university.primary_color)}`;
+  return pdfToBuffer((doc) => {
+    let y = pdfHeader(doc, university, title, `${exams.length} exams`);
+    const left = doc.page.margins.left;
+    const cols = [['Date / time', 110], ['Course unit', 210], ['Classes', 170], ['Rooms (seats)', 130], ['Invigilators', 160]];
+    const drawHead = () => {
+      let x = left;
+      doc.rect(left, y, cols.reduce((t, [, w]) => t + w, 0), 18).fill(primary);
+      doc.font('Helvetica-Bold').fontSize(8.5).fillColor('#FFFFFF');
+      for (const [h, w] of cols) {
+        doc.text(h, x + 4, y + 5, { width: w - 8, lineBreak: false });
+        x += w;
+      }
+      y += 20;
+    };
+    drawHead();
+    doc.font('Helvetica').fontSize(8.5).fillColor('#222222');
+    for (const e of exams) {
+      const day = DAY_NAMES[new Date(`${e.exam_date}T12:00:00Z`).getUTCDay() || 7];
+      const cells = [
+        `${day} ${e.exam_date}\n${e.start_time}-${e.end_time}`,
+        `${e.course_code} ${e.course_name}\n${e.students} students`,
+        e.classes.map((c) => c.name).join(', '),
+        e.rooms.map((r) => `${r.name} (${r.seats})`).join(', '),
+        e.invigilators.map((p) => p.name).join(', '),
+      ];
+      const h = Math.max(...cells.map((c, i) => doc.heightOfString(c, { width: cols[i][1] - 8 }))) + 8;
+      if (y + h > doc.page.height - doc.page.margins.bottom) {
+        doc.addPage();
+        y = doc.page.margins.top;
+        drawHead();
+        doc.font('Helvetica').fontSize(8.5).fillColor('#222222');
+      }
+      let x = left;
+      cells.forEach((c, i) => {
+        doc.text(c, x + 4, y + 4, { width: cols[i][1] - 8 });
+        x += cols[i][1];
+      });
+      doc.moveTo(left, y + h).lineTo(x, y + h).strokeColor('#E4E7EC').lineWidth(0.5).stroke();
+      y += h;
+    }
+  });
+}
+
+/** A paid claim's payslip (or, before payment, the claim form) with the approval trail. */
+export function payslipPdf(university, claim, lines, events) {
+  const primary = `#${hex(university.primary_color)}`;
+  const money = (n) => `${claim.currency} ${Number(n || 0).toLocaleString('en', { maximumFractionDigits: 2 })}`;
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: 'A4', margin: 40 });
+    const chunks = [];
+    doc.on('data', (c) => chunks.push(c));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+    try {
+      let y = pdfHeader(doc, university, claim.status === 'paid' ? 'Part-time payslip' : 'Part-time pay claim', `${claim.title} · ${claim.status_label || claim.status}`);
+      const left = doc.page.margins.left;
+      const width = doc.page.width - left - doc.page.margins.right;
+      const info = [
+        ['Lecturer', [claim.lecturer_title, claim.lecturer_name].filter(Boolean).join(' ')],
+        ['Staff number', claim.lecturer_identifier || '-'],
+        ['Department', claim.department_name || '-'],
+        ['Faculty', claim.faculty_name || '-'],
+        ['Period', `${claim.period_start} to ${claim.period_end}`],
+        ['Payment reference', claim.payment_reference || '-'],
+      ];
+      doc.font('Helvetica').fontSize(9.5);
+      for (const [k, v] of info) {
+        doc.fillColor('#667085').text(k, left, y, { width: 120 });
+        doc.fillColor('#101828').text(v, left + 120, y, { width: width - 120 });
+        y += 15;
+      }
+      y += 8;
+      const cols = [['Date', 70], ['Item', 210], ['Quantity', 70], ['Rate', 80], ['Amount', width - 430]];
+      const row = (cells, bold = false, fill = null) => {
+        const h = Math.max(...cells.map((c, i) => doc.heightOfString(String(c), { width: cols[i][1] - 8 }))) + 8;
+        if (y + h > doc.page.height - 60) {
+          doc.addPage();
+          y = doc.page.margins.top;
+        }
+        if (fill) doc.rect(left, y, width, h).fill(fill);
+        doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(9).fillColor(fill === primary ? '#FFFFFF' : '#101828');
+        let x = left;
+        cells.forEach((c, i) => {
+          doc.text(String(c), x + 4, y + 4, { width: cols[i][1] - 8, align: i >= 2 ? 'right' : 'left' });
+          x += cols[i][1];
+        });
+        y += h;
+      };
+      row(cols.map(([h]) => h), true, primary);
+      for (const l of lines) {
+        const item = l.kind === 'teaching' ? `Teaching ${l.course_unit_code || ''} ${l.start_time || ''}-${l.end_time || ''} (${l.class_names || ''})` : `${l.rate_name}: ${l.description || ''}`;
+        row([l.work_date, item, `${Number(l.quantity)} ${l.unit}${Number(l.quantity) === 1 ? '' : 's'}`, money(l.unit_price), money(l.amount)]);
+      }
+      row(['', 'Total', '', '', money(claim.total)], true, '#F2F4F7');
+      y += 14;
+      doc.font('Helvetica-Bold').fontSize(10).fillColor(primary).text('Approvals', left, y);
+      y += 16;
+      doc.font('Helvetica').fontSize(9).fillColor('#101828');
+      for (const e of events) {
+        doc.text(`${localStamp(university, e.created_at)}  ${e.action}${e.stage ? ` (${e.stage})` : ''} by ${e.actor_name || '-'}${e.note ? ` - ${e.note}` : ''}`, left, y, { width });
+        y = doc.y + 4;
+      }
+      doc.end();
+    } catch (err) {
+      reject(err);
+    }
+  });
 }

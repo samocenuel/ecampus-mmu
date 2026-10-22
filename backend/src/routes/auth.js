@@ -1,5 +1,9 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import { Router } from 'express';
+import multer from 'multer';
+import { config } from '../config.js';
 import { authenticate, hashPassword, loadUser, signToken, verifyPassword } from '../auth.js';
 import { DEMO_ROLES, demoUniversity, isProtectedDemoAccount } from '../demo.js';
 import { insert, q, tx } from '../db.js';
@@ -93,8 +97,54 @@ router.post('/change-password', authenticate, (req, res) => {
   const row = q.get('SELECT password_hash FROM users WHERE id = ?', req.user.id);
   if (!verifyPassword(String(current_password || ''), row.password_hash)) throw badRequest('Current password is incorrect');
   validatePassword(new_password);
-  q.run('UPDATE users SET password_hash = ? WHERE id = ?', hashPassword(new_password), req.user.id);
-  res.json({ ok: true });
+  if (String(current_password) === String(new_password)) throw badRequest('Choose a password different from the current one');
+  q.run('UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?', hashPassword(new_password), req.user.id);
+  res.json({ ok: true, user: loadUser(req.user.id) });
+});
+
+/** People update their own name, title and phone (email and role are managed by administrators). */
+router.put('/me', authenticate, (req, res) => {
+  const data = pick(req.body || {}, ['name', 'title', 'phone']);
+  if (data.name !== undefined) {
+    data.name = String(data.name).trim();
+    if (data.name.length < 2) throw badRequest('Enter your full name');
+    if (isProtectedDemoAccount(req.user)) throw forbidden('The shared demo accounts keep their names');
+  }
+  for (const k of ['title', 'phone']) if (data[k] !== undefined) data[k] = String(data[k] || '').trim() || null;
+  const keys = Object.keys(data);
+  if (keys.length) q.run(`UPDATE users SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`, ...keys.map((k) => data[k]), req.user.id);
+  res.json({ user: loadUser(req.user.id) });
+});
+
+const photoDir = path.join(config.uploadDir, 'photos');
+const PHOTO_EXT = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp' };
+const photoUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => {
+      fs.mkdirSync(photoDir, { recursive: true });
+      cb(null, photoDir);
+    },
+    filename: (req, file, cb) => cb(null, `user-${req.user.id}-${Date.now()}${PHOTO_EXT[file.mimetype]}`),
+  }),
+  limits: { fileSize: 3 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => (PHOTO_EXT[file.mimetype] ? cb(null, true) : cb(badRequest('The photo must be a PNG, JPEG or WebP image'))),
+});
+
+const removePhoto = (photoPath) => photoPath && fs.rm(path.join(config.uploadDir, photoPath), { force: true }, () => {});
+
+router.post('/me/photo', authenticate, photoUpload.single('photo'), (req, res) => {
+  if (!req.file) throw badRequest('Attach an image in the "photo" field');
+  const old = q.get('SELECT photo_path FROM users WHERE id = ?', req.user.id)?.photo_path;
+  q.run('UPDATE users SET photo_path = ? WHERE id = ?', `photos/${req.file.filename}`, req.user.id);
+  removePhoto(old);
+  res.json({ user: loadUser(req.user.id) });
+});
+
+router.delete('/me/photo', authenticate, (req, res) => {
+  const old = q.get('SELECT photo_path FROM users WHERE id = ?', req.user.id)?.photo_path;
+  q.run('UPDATE users SET photo_path = NULL WHERE id = ?', req.user.id);
+  removePhoto(old);
+  res.json({ user: loadUser(req.user.id) });
 });
 
 /**
@@ -118,7 +168,7 @@ router.post('/delete-account', authenticate, (req, res) => {
     const id = req.user.id;
     q.run(
       `UPDATE users SET name = 'Deleted user', email = ?, password_hash = ?, phone = NULL, identifier = NULL,
-              title = NULL, active = 0 WHERE id = ?`,
+              title = NULL, photo_path = NULL, calendar_token = NULL, active = 0 WHERE id = ?`,
       `deleted-${id}@deleted.invalid`,
       hashPassword(crypto.randomBytes(24).toString('hex')),
       id,
@@ -128,7 +178,9 @@ router.post('/delete-account', authenticate, (req, res) => {
     q.run('UPDATE departments SET hod_id = NULL WHERE hod_id = ?', id);
     q.run('DELETE FROM notifications WHERE user_id = ?', id);
     q.run('DELETE FROM notification_prefs WHERE user_id = ?', id);
+    q.run('DELETE FROM student_devices WHERE user_id = ?', id);
   });
+  removePhoto(req.user.photo_path);
   res.json({ ok: true });
 });
 

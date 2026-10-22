@@ -21,7 +21,8 @@ if (process.env.SEED_DEMO === 'true' && !q.get('SELECT 1 FROM universities LIMIT
 // (an existing account keeps its password, so it can be changed in the app afterwards).
 const ownerEmail = process.env.SUPER_ADMIN_EMAIL?.trim();
 if (ownerEmail && process.env.SUPER_ADMIN_PASSWORD && !q.get('SELECT 1 FROM users WHERE email = ?', ownerEmail)) {
-  insert('users', { university_id: null, name: 'Platform Owner', email: ownerEmail, password_hash: hashPassword(process.env.SUPER_ADMIN_PASSWORD), role: 'super_admin' });
+  // The starting password is set by whoever configures the server, so it must be replaced at first sign-in.
+  insert('users', { university_id: null, name: 'Platform Owner', email: ownerEmail, password_hash: hashPassword(process.env.SUPER_ADMIN_PASSWORD), role: 'super_admin', must_change_password: 1 });
   console.log(`Created platform owner ${ownerEmail}`);
 }
 

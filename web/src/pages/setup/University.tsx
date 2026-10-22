@@ -141,6 +141,27 @@ export default function UniversitySettings() {
               </Field>
             </div>
           </Card>
+          <Card title="Attendance and exam rules">
+            <div className="form-grid">
+              <Field label="Minimum attendance to sit exams (%)">
+                <Input type="number" min={0} max={100} {...set('exam_min_attendance')} />
+              </Field>
+              <Field label="Minimum coursework to sit exams (%)" help="Of each programme's coursework total, e.g. 50% = 20/40">
+                <Input type="number" min={0} max={100} {...set('coursework_min_percent')} />
+              </Field>
+              <Field label="Manual check-in marks per student per term" help="The HoD is told when a student passes it">
+                <Input type="number" min={0} max={100} {...set('manual_mark_limit')} />
+              </Field>
+              <Field label="Correction requests accepted for (hours)">
+                <Input type="number" min={1} max={720} {...set('correction_hours')} />
+              </Field>
+            </div>
+            <Checkbox
+              label="Part-time teaching claims only count lectures confirmed by student QR check-ins"
+              checked={Boolean(form.claims_require_checkin)}
+              onChange={(v) => setForm({ ...form, claims_require_checkin: v ? 1 : 0 })}
+            />
+          </Card>
         </div>
       </div>
     </form>

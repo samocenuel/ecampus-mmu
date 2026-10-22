@@ -3,8 +3,10 @@ import 'package:provider/provider.dart';
 
 import '../core/app_state.dart';
 import '../widgets/common.dart';
+import 'checkin_screen.dart';
 import 'claims_screen.dart';
 import 'home_shell.dart';
+import 'lectures_screen.dart';
 
 class DashboardScreen extends StatelessWidget {
   const DashboardScreen({super.key, required this.onNavigate});
@@ -23,6 +25,13 @@ class DashboardScreen extends StatelessWidget {
     final user = app.user!;
     return Scaffold(
       appBar: AppBar(title: const BrandTitle('Home')),
+      floatingActionButton: app.isStudent
+          ? FloatingActionButton.extended(
+              onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ScanScreen())),
+              icon: const Icon(Icons.qr_code_scanner),
+              label: const Text('Check in'),
+            )
+          : null,
       body: AsyncView<Map<String, dynamic>>(
         load: () async => await app.api.get('/api/dashboard') as Map<String, dynamic>,
         builder: (context, d, reload) {
@@ -40,6 +49,14 @@ class DashboardScreen extends StatelessWidget {
               style: TextStyle(color: scheme.onSurfaceVariant),
             ),
             const SizedBox(height: 16),
+            if (app.isStudent || app.teaches) const _OpenCheckins(),
+            if ((d['missed_lectures'] ?? 0) > 0)
+              _ActionBanner(
+                icon: Icons.event_busy_outlined,
+                text: '${d['missed_lectures']} ${d['missed_lectures'] == 1 ? 'lecture' : 'lectures'} in the last two weeks had no attendance taken.',
+                action: 'View',
+                onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const MissedLecturesScreen())),
+              ),
             if ((d['claims']?['awaiting_me'] ?? 0) > 0)
               _ActionBanner(
                 icon: Icons.account_balance_wallet_outlined,
@@ -160,6 +177,38 @@ class DashboardScreen extends StatelessWidget {
       const SizedBox(height: 6),
       LinearProgressIndicator(value: t > 0 ? d / t : 0, minHeight: 8, color: color, borderRadius: BorderRadius.circular(8)),
     ]);
+  }
+}
+
+/// Check-ins open right now: students scan, lecturers go back to the code.
+class _OpenCheckins extends StatelessWidget {
+  const _OpenCheckins();
+
+  @override
+  Widget build(BuildContext context) {
+    final app = context.read<AppState>();
+    return FutureBuilder<dynamic>(
+      future: app.api.get('/api/checkin/active'),
+      builder: (context, snap) {
+        final list = (snap.data as List?)?.cast<Map<String, dynamic>>() ?? const [];
+        return Column(children: [
+          for (final c in list)
+            _ActionBanner(
+              icon: c['checked_in'] == true ? Icons.verified_outlined : Icons.qr_code_2,
+              text: app.isStudent
+                  ? (c['checked_in'] == true
+                      ? 'You are checked in to ${c['occurrence']['course_code']}.'
+                      : 'Check-in is open for ${c['occurrence']['course_code']} in ${c['occurrence']['room_name']}.')
+                  : 'Check-in is open for ${c['occurrence']['course_code']}.',
+              action: app.isStudent ? (c['checked_in'] == true ? 'OK' : 'Scan') : 'Show code',
+              onTap: () {
+                if (app.isStudent && c['checked_in'] == true) return;
+                Navigator.of(context).push(MaterialPageRoute(builder: (_) => app.isStudent ? const ScanScreen() : CheckinHostScreen(id: c['checkin_id'] as int)));
+              },
+            ),
+        ]);
+      },
+    );
   }
 }
 

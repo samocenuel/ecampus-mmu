@@ -7,6 +7,8 @@ export interface User {
   email: string;
   role: Role;
   employment_type?: 'full_time' | 'part_time';
+  photo_url?: string | null;
+  must_change_password?: boolean;
   title?: string | null;
   phone?: string | null;
   identifier?: string | null;

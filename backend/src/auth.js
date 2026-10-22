@@ -32,6 +32,8 @@ export function loadUser(id) {
   );
   if (!user) return undefined;
   delete user.password_hash;
+  user.photo_url = user.photo_path ? `/uploads/${user.photo_path}` : null;
+  user.must_change_password = Boolean(user.must_change_password);
   const repClasses = q.all('SELECT id, name FROM classes WHERE class_rep_id = ?', id);
   user.rep_classes = repClasses;
   user.is_class_rep = repClasses.length > 0;

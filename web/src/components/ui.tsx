@@ -209,7 +209,8 @@ export function rateTone(rate: number | null | undefined): 'success' | 'warning'
   return rate >= 80 ? 'success' : rate >= 75 ? 'warning' : 'danger';
 }
 
-export function Avatar({ name, size = 32 }: { name: string; size?: number }) {
+export function Avatar({ name, size = 32, src }: { name: string; size?: number; src?: string | null }) {
+  if (src) return <img className="avatar avatar-img" src={src} alt="" style={{ width: size, height: size }} />;
   const initials = name
     .replace(/^(Dr|Prof|Mr|Ms|Mrs)\.?\s+/i, '')
     .split(/\s+/)

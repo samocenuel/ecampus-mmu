@@ -1,14 +1,15 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, Check, Download, Pencil, Plus, Printer, RefreshCw, Trash2, Undo2, Users as UsersIcon, Wallet } from 'lucide-react';
+import { ArrowLeft, Check, Download, FileText, Pencil, PiggyBank, Plus, Printer, QrCode, RefreshCw, Trash2, Undo2, Users as UsersIcon, Wallet } from 'lucide-react';
 import { api, download } from '../api';
 import { useAuth } from '../auth';
 import { useFeedback } from '../components/feedback';
 import { FieldDef, FormFields } from '../components/ResourcePage';
 import {
-  Alert, Badge, Button, Card, DataTable, EmptyState, ErrorNote, Field, IconButton, Input, Modal, PageHeader, plural, Select, Spinner, StatCard, Tabs, Textarea,
+  Alert, Badge, Button, Card, DataTable, EmptyState, ErrorNote, Field, IconButton, Input, Modal, PageHeader, plural, Progress, Select, Spinner, StatCard, Tabs, Textarea,
 } from '../components/ui';
 import { useFetch, usePersistentState } from '../hooks';
+import { useTerms } from './Timetable';
 import { ROLE_LABELS, Role } from '../types';
 
 type Tone = 'neutral' | 'primary' | 'success' | 'warning' | 'danger' | 'info';
@@ -124,20 +125,25 @@ function Rates() {
       options: [{ value: 'task', label: 'Task (marking, supervision...)' }, { value: 'teaching', label: 'Teaching (per contact hour)' }],
     },
     { name: 'name', label: 'Name', required: true, placeholder: 'e.g. Marking, Internship supervision' },
-    { name: 'unit', label: 'Paid per', type: 'select', noPlaceholder: true, showIf: (f) => f.kind !== 'teaching', options: UNITS.map((u) => ({ value: u, label: u })) },
+    {
+      name: 'invigilation', label: 'Use this rate for exam invigilation', type: 'checkbox', span: 2, showIf: (f) => f.kind !== 'teaching',
+      help: 'Invigilation duties on the exam timetable are added to claims at this rate, per hour.',
+    },
+    { name: 'unit', label: 'Paid per', type: 'select', noPlaceholder: true, showIf: (f) => f.kind !== 'teaching' && !f.invigilation, options: UNITS.map((u) => ({ value: u, label: u })) },
     { name: 'amount', label: `Unit price (${currency})`, type: 'number', required: true, min: 0 },
     { name: 'description', label: 'Notes', span: 2, placeholder: 'What the rate covers' },
   ];
 
   const open = (r: any | 'new') => {
-    setForm(r === 'new' ? { kind: 'task', unit: 'script', faculty_id: faculties?.length === 1 ? faculties[0].id : '' } : { ...r });
+    setForm(r === 'new' ? { kind: 'task', unit: 'script', faculty_id: faculties?.length === 1 ? faculties[0].id : '' } : { ...r, invigilation: r.code === 'invigilation' });
     setEditing(r);
   };
   const save = async (e: FormEvent) => {
     e.preventDefault();
     setBusy(true);
     try {
-      const body = { ...form, faculty_id: form.faculty_id || faculties?.[0]?.id };
+      const { invigilation, ...rest } = form;
+      const body = { ...rest, faculty_id: form.faculty_id || faculties?.[0]?.id, ...(form.kind !== 'teaching' ? { code: invigilation ? 'invigilation' : null } : {}) };
       if (editing === 'new') await api('/api/claims/rates', { method: 'POST', body });
       else await api(`/api/claims/rates/${editing.id}`, { method: 'PUT', body });
       toast('Rate saved');
@@ -190,7 +196,7 @@ function Rates() {
             header: 'Item',
             render: (r: any) => (
               <>
-                <strong>{r.name}</strong> {r.kind === 'teaching' && <Badge tone="primary">Teaching</Badge>}
+                <strong>{r.name}</strong> {r.kind === 'teaching' && <Badge tone="primary">Teaching</Badge>} {r.code === 'invigilation' && <Badge tone="info">Invigilation</Badge>}
                 {r.description && <div className="muted small">{r.description}</div>}
               </>
             ),
@@ -243,9 +249,99 @@ function Rates() {
   );
 }
 
+// ---------------------------------------------------------------- Budgets
+
+function Budgets() {
+  const { university } = useAuth();
+  const { toast, fail } = useFeedback();
+  const { terms, current } = useTerms();
+  const [termId, setTermId] = useState<number | null>(null);
+  const term = termId ?? current?.id;
+  const { data, loading, error, reload } = useFetch<any>(term ? `/api/claims/budgets?term_id=${term}` : '/api/claims/budgets');
+  const [editing, setEditing] = useState<any>(null);
+  const [amount, setAmount] = useState('');
+  const [busy, setBusy] = useState(false);
+  const currency = university?.currency || 'UGX';
+
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      await api('/api/claims/budgets', { method: 'PUT', body: { department_id: editing.id, term_id: data.term.id, amount: Number(amount) } });
+      toast('Budget saved');
+      setEditing(null);
+      reload();
+    } catch (err) {
+      fail(err);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card
+      title={<span className="row gap-sm"><PiggyBank size={18} /> Part-time pay budgets</span>}
+      padded={false}
+      actions={terms.length > 1 && <Select value={term ?? ''} onChange={(e) => setTermId(Number(e.target.value))} options={terms.map((t) => ({ value: t.id, label: t.name }))} aria-label="Term" />}
+    >
+      <ErrorNote error={error} />
+      <div className="pad-x muted small">Claims submitted in a term count against the department's budget. Approvers are warned when a claim takes a department over it.</div>
+      <DataTable
+        rows={data?.departments}
+        loading={loading}
+        empty={data && !data.term ? 'Add a term first' : 'No departments'}
+        columns={[
+          { key: 'name', header: 'Department', render: (d: any) => <><strong>{d.name}</strong><div className="muted small">{d.faculty_name}</div></> },
+          { key: 'amount', header: 'Budget', align: 'right', render: (d: any) => (d.amount == null ? <span className="muted">Not set</span> : <strong>{money(d.amount, currency)}</strong>) },
+          { key: 'committed', header: 'Claimed', align: 'right', render: (d: any) => money(d.committed, currency) },
+          { key: 'paid', header: 'Paid', align: 'right', hideOnMobile: true, render: (d: any) => money(d.paid, currency) },
+          {
+            key: 'remaining',
+            header: 'Used',
+            render: (d: any) =>
+              d.amount == null ? (
+                <span className="muted">-</span>
+              ) : (
+                <div style={{ minWidth: 120 }}>
+                  <Progress value={d.committed} total={d.amount || 1} tone={d.remaining < 0 ? 'danger' : d.committed > d.amount * 0.85 ? 'warning' : undefined} />
+                  <div className={`small ${d.remaining < 0 ? 'text-danger' : 'muted'}`}>{d.remaining < 0 ? `${money(-d.remaining, currency)} over` : `${money(d.remaining, currency)} left`}</div>
+                </div>
+              ),
+          },
+          {
+            key: '_a',
+            header: '',
+            align: 'right',
+            render: (d: any) =>
+              d.can_set && (
+                <IconButton label="Set budget" onClick={() => { setEditing(d); setAmount(d.amount == null ? '' : String(d.amount)); }}>
+                  <Pencil size={16} />
+                </IconButton>
+              ),
+          },
+        ]}
+      />
+      {editing && (
+        <Modal
+          open
+          title={`${editing.name}: ${data.term.name}`}
+          onClose={() => setEditing(null)}
+          footer={<><Button variant="secondary" onClick={() => setEditing(null)}>Cancel</Button><Button type="submit" form="budget-form" loading={busy}>Save</Button></>}
+        >
+          <form id="budget-form" onSubmit={save}>
+            <Field label={`Part-time pay budget (${currency}) *`} help={`Already claimed this term: ${money(editing.committed, currency)}`}>
+              <Input type="number" min={0} step="any" required autoFocus value={amount} onChange={(e) => setAmount(e.target.value)} />
+            </Field>
+          </form>
+        </Modal>
+      )}
+    </Card>
+  );
+}
+
 // ------------------------------------------------------------------ List
 
-type View = 'mine' | 'queue' | 'all' | 'rates';
+type View = 'mine' | 'queue' | 'all' | 'rates' | 'budgets';
 
 export default function Claims() {
   const { user, university } = useAuth();
@@ -257,11 +353,12 @@ export default function Claims() {
     ...(partTimer ? [{ value: 'mine' as View, label: 'My claims' }] : []),
     ...(approver ? [{ value: 'queue' as View, label: 'Awaiting me' }, { value: 'all' as View, label: 'All claims' }] : []),
     ...(['admin', 'dean', 'hod', 'hr'].includes(user?.role || '') || partTimer ? [{ value: 'rates' as View, label: 'Pay rates' }] : []),
+    ...(approver ? [{ value: 'budgets' as View, label: 'Budgets' }] : []),
   ];
   const [view, setView] = usePersistentState<View>('lms_claims_view', tabs[0]?.value || 'mine');
   const current = tabs.some((t) => t.value === view) ? view : tabs[0]?.value;
   const { data: summary } = useFetch<any>('/api/claims/summary');
-  const { data, loading, error } = useFetch<any[]>(current === 'rates' ? null : `/api/claims?view=${current}`);
+  const { data, loading, error } = useFetch<any[]>(current === 'rates' || current === 'budgets' ? null : `/api/claims?view=${current}`);
   const [creating, setCreating] = useState(false);
   const currency = university?.currency || 'UGX';
   if (summary) for (const t of tabs) if (t.value === 'queue') t.count = summary.awaiting_me;
@@ -317,6 +414,8 @@ export default function Claims() {
       <ErrorNote error={error} />
       {current === 'rates' ? (
         <Rates />
+      ) : current === 'budgets' ? (
+        <Budgets />
       ) : (
         <Card padded={false}>
           <DataTable
@@ -473,8 +572,9 @@ function Decide({ claim, mode, onClose, onDone }: { claim: any; mode: 'approve' 
     e.preventDefault();
     setBusy(true);
     try {
-      await api(`/api/claims/${claim.id}/${mode}`, { method: 'POST', body: { note, payment_reference: reference } });
+      const r = await api(`/api/claims/${claim.id}/${mode}`, { method: 'POST', body: { note, payment_reference: reference } });
       toast(mode === 'reject' ? 'Claim returned to the lecturer' : paying ? 'Payment recorded' : 'Claim approved and passed on');
+      if (r?.budget_warning) toast(r.budget_warning, 'error');
       onDone();
       onClose();
     } catch (err) {
@@ -582,6 +682,11 @@ export function ClaimDetail() {
             <Button variant="secondary" icon={<Printer size={16} />} onClick={() => window.print()}>
               Print
             </Button>
+            {claim.status !== 'draft' && (
+              <Button variant="secondary" icon={<FileText size={16} />} onClick={() => download(`/api/claims/${claim.id}/payslip`, `${claim.status === 'paid' ? 'payslip' : 'claim'}-${claim.id}.pdf`).catch(fail)}>
+                {claim.status === 'paid' ? 'Payslip PDF' : 'Claim PDF'}
+              </Button>
+            )}
             {claim.can_edit && claim.status === 'draft' && (
               <Button variant="ghost" icon={<Trash2 size={16} />} onClick={deleteDraft}>
                 Delete draft
@@ -639,7 +744,24 @@ export function ClaimDetail() {
           <StatCard label="Teaching" value={money(teachingTotal, claim.currency)} hint={claim.teaching_rate ? `${money(claim.teaching_rate.amount, claim.currency)} per hour` : undefined} />
           <StatCard label="Tasks" value={money(taskTotal, claim.currency)} hint={plural(tasks.length, 'item')} />
           <StatCard label="Total claimed" value={money(claim.total, claim.currency)} tone="primary" />
+          {claim.verification?.lectures > 0 && (
+            <StatCard
+              label="QR-confirmed lectures"
+              value={`${claim.verification.confirmed} of ${claim.verification.lectures}`}
+              hint="Students checked in with their phones"
+              tone={claim.verification.confirmed === claim.verification.lectures ? 'success' : 'warning'}
+              icon={<QrCode size={20} />}
+            />
+          )}
         </div>
+
+        {claim.budget && claim.budget.amount != null && (
+          <Alert tone={claim.budget.would_exceed || claim.budget.remaining < 0 ? 'warning' : 'info'} title={`${claim.department_name} budget, ${claim.budget.term_name}`}>
+            {money(claim.budget.committed, claim.currency)} of {money(claim.budget.amount, claim.currency)} claimed so far
+            {claim.budget.remaining < 0 ? `, ${money(-claim.budget.remaining, claim.currency)} over budget.` : `, ${money(claim.budget.remaining, claim.currency)} left.`}
+            {claim.budget.would_exceed && claim.budget.remaining >= 0 && ' Approving this claim would take the department over budget.'}
+          </Alert>
+        )}
 
         <Card
           title="Lectures taught"
@@ -665,6 +787,7 @@ export function ClaimDetail() {
                 render: (l: any) => (
                   <button type="button" className="link row gap-sm" onClick={(e) => { e.stopPropagation(); setAttendance(l); }}>
                     <UsersIcon size={14} /> {l.students_present} of {l.students_total}
+                    {l.self_checkins > 0 && <Badge tone="success"><QrCode size={11} /> {l.self_checkins}</Badge>}
                   </button>
                 ),
               },

@@ -57,11 +57,20 @@ router.get('/programs/:id', (req, res) => {
   res.json(program);
 });
 
-const PROGRAM_FIELDS = ['department_id', 'name', 'code', 'level', 'duration_years'];
+const PROGRAM_FIELDS = ['department_id', 'name', 'code', 'level', 'duration_years', 'coursework_max'];
+
+/** Coursework total per programme (e.g. 40), set by the HoD; marks are converted to it. */
+function checkCourseworkMax(data) {
+  if (data.coursework_max === undefined) return;
+  const n = Number(data.coursework_max);
+  if (!(n > 0 && n <= 100)) throw badRequest('Coursework total must be between 1 and 100');
+  data.coursework_max = n;
+}
 
 router.post('/programs', requireRole(...MANAGER_ROLES), (req, res) => {
   requireFields(req.body, ['department_id', 'name', 'code']);
   const data = pick(req.body, PROGRAM_FIELDS);
+  checkCourseworkMax(data);
   one('SELECT id FROM departments WHERE id = ? AND university_id = ?', 'Department', data.department_id, req.uid);
   assertManageDepartment(req.user, data.department_id);
   data.code = String(data.code).trim().toUpperCase();
@@ -73,6 +82,7 @@ router.put('/programs/:id', requireRole(...MANAGER_ROLES), (req, res) => {
   const p = one('SELECT * FROM programs WHERE id = ? AND university_id = ?', 'Programme', req.params.id, req.uid);
   assertManageDepartment(req.user, p.department_id);
   const data = pick(req.body, PROGRAM_FIELDS);
+  checkCourseworkMax(data);
   if (data.department_id) {
     one('SELECT id FROM departments WHERE id = ? AND university_id = ?', 'Department', data.department_id, req.uid);
     assertManageDepartment(req.user, data.department_id);

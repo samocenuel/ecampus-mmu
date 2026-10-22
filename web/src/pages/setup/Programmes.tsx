@@ -29,7 +29,7 @@ export function Programmes() {
       deleteMessage={(p: any) => `Deleting ${p.code} also deletes its ${p.class_count} class(es).`}
       columns={[
         { key: 'code', header: 'Code', width: '100px', render: (p: any) => <strong>{p.code}</strong> },
-        { key: 'name', header: 'Programme', render: (p: any) => <>{p.name}<div className="muted small">{p.level} · {p.duration_years} years</div></> },
+        { key: 'name', header: 'Programme', render: (p: any) => <>{p.name}<div className="muted small">{p.level} · {p.duration_years} years · coursework /{p.coursework_max ?? 40}</div></> },
         { key: 'department_name', header: 'Department', hideOnMobile: true },
         { key: 'course_unit_count', header: 'Course units', align: 'right' },
         { key: 'class_count', header: 'Classes', align: 'right', hideOnMobile: true },
@@ -40,8 +40,9 @@ export function Programmes() {
         { name: 'code', label: 'Code', required: true, placeholder: 'e.g. BSCS' },
         { name: 'level', label: 'Level', type: 'select', defaultValue: 'Bachelor', options: LEVELS.map((l) => ({ value: l, label: l })) },
         { name: 'duration_years', label: 'Duration (years)', type: 'number', min: 1, max: 7, defaultValue: 3 },
+        { name: 'coursework_max', label: 'Coursework marks out of', type: 'number', min: 1, max: 100, defaultValue: 40, help: 'Coursework uploads are converted to this total; students need half of it to sit exams.' },
       ]}
-      fromRow={(p: any) => ({ department_id: p.department_id, name: p.name, code: p.code, level: p.level, duration_years: p.duration_years })}
+      fromRow={(p: any) => ({ department_id: p.department_id, name: p.name, code: p.code, level: p.level, duration_years: p.duration_years, coursework_max: p.coursework_max ?? 40 })}
     />
   );
 }

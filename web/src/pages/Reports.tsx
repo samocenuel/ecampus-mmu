@@ -7,6 +7,33 @@ import { Badge, Button, Card, DataTable, ErrorNote, PageHeader, Progress, rateTo
 import { useFetch } from '../hooks';
 import { useTerms } from './Timetable';
 
+/** Lectures that ended in the last two weeks with no attendance taken (no register, no check-in). */
+function MissedLectures() {
+  const { data, loading, error } = useFetch<any>('/api/ops/missed');
+  const day = (d: string) => new Date(`${d}T12:00:00`).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+  return (
+    <Card
+      title={<span className="row gap-sm">Lectures with no attendance <Badge tone={data?.items.length ? 'danger' : 'success'}>{data ? data.items.length : '…'}</Badge></span>}
+      padded={false}
+      actions={<span className="muted small">Last 14 days</span>}
+    >
+      <ErrorNote error={error} />
+      <DataTable
+        rows={data?.items.map((o: any) => ({ ...o, id: o.key }))}
+        loading={loading}
+        searchKeys={['course_code', 'course_name', 'lecturer_name']}
+        empty="Every lecture had attendance taken"
+        columns={[
+          { key: 'date', header: 'Date', render: (o: any) => <>{day(o.date)}<div className="muted small">{o.start_time}-{o.end_time}</div></> },
+          { key: 'course_code', header: 'Course unit', render: (o: any) => <><strong>{o.course_code}</strong> {o.course_name}<div className="muted small">{o.classes.map((c: any) => c.name).join(', ')}</div></> },
+          { key: 'lecturer_name', header: 'Lecturer' },
+          { key: 'room_name', header: 'Room', hideOnMobile: true },
+        ]}
+      />
+    </Card>
+  );
+}
+
 const Rate = ({ value }: { value: number | null }) =>
   value === null || value === undefined ? <span className="muted">-</span> : <strong className={`text-${rateTone(value)}`}>{value}%</strong>;
 
@@ -167,6 +194,8 @@ export default function Reports() {
               />
             </Card>
           </div>
+
+          <MissedLectures />
 
           {r.rooms.length > 0 && (
             <Card title="Room utilisation" padded={false}>

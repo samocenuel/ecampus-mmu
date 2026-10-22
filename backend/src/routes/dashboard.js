@@ -2,10 +2,12 @@ import { Router } from 'express';
 import { MANAGER_ROLES, TEACHING_ROLES } from '../auth.js';
 import { q } from '../db.js';
 import { courseUnitScope, currentTerm, managedDepartmentIds, placeholders, scopeLabel } from '../scope.js';
+import { occurrences, occurrencesForUser } from '../services/occurrences.js';
+import { missedLectures } from '../services/ops.js';
 import { claimSummary, isPartTimer } from '../services/pay.js';
 import { buildReport } from '../services/reports.js';
-import { sessionsForUser, upcomingForUser } from '../services/schedule.js';
-import { DAY_NAMES, zonedNow } from '../util.js';
+import { upcomingForUser } from '../services/schedule.js';
+import { addDays, DAY_NAMES, zonedNow } from '../util.js';
 
 const router = Router();
 
@@ -20,7 +22,8 @@ router.get('/', (req, res) => {
     term,
     today: now.date,
     day_name: DAY_NAMES[now.dow],
-    today_sessions: term ? sessionsForUser(user, term.id).filter((s) => s.day_of_week === now.dow) : [],
+    // Today's lectures after moves, cancellations, holidays and covers (id = timetable session id).
+    today_sessions: occurrencesForUser(user, now.date, now.date).map((o) => ({ ...o, id: o.session_id })),
     upcoming: upcomingForUser(user, 7).items.slice(0, 6),
     unread_notifications: q.get('SELECT COUNT(*) AS n FROM notifications WHERE user_id = ? AND read_at IS NULL', user.id).n,
   };
@@ -53,6 +56,11 @@ router.get('/', (req, res) => {
   }
 
   if (isPartTimer(user) || ['admin', 'dean', 'hod', 'hr'].includes(user.role)) out.claims = claimSummary(user);
+  if (MANAGER_ROLES.includes(user.role) || TEACHING_ROLES.includes(user.role)) {
+    const from = addDays(now.date, -13);
+    const opts = user.role === 'admin' ? {} : MANAGER_ROLES.includes(user.role) ? { departmentIds: managedDepartmentIds(user) } : { lecturerId: user.id };
+    out.missed_lectures = missedLectures(req.uid, { from, to: now.date, ...opts }).length;
+  }
 
   if (user.role === 'student') {
     const row = q.get(
@@ -64,15 +72,15 @@ router.get('/', (req, res) => {
     out.is_class_rep = user.is_class_rep;
     if (user.is_class_rep && term) {
       const repIds = user.rep_classes.map((c) => c.id);
-      const due = sessionsForUser({ ...user, role: 'student' }, term.id).filter((s) => s.day_of_week === now.dow);
+      const due = occurrences(req.uid, { from: now.date, to: now.date, classIds: repIds });
       out.registers_due_today = due.filter(
-        (s) =>
+        (o) =>
           !q.get(
             `SELECT 1 FROM attendance_registers WHERE session_id = ? AND lecture_date = ? AND class_id IN (${placeholders(repIds)})`,
-            s.id,
+            o.session_id,
             now.date,
             ...repIds,
-          ),
+          ) && !q.get('SELECT 1 FROM checkin_sessions WHERE session_id = ? AND lecture_date = ?', o.session_id, now.date),
       ).length;
     }
   }

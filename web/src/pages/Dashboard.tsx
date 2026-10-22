@@ -48,6 +48,25 @@ function SetupChecklist({ d }: { d: any }) {
   );
 }
 
+/** A lecture with QR check-in open right now: students scan with the eCampus app on their phone. */
+function OpenCheckins() {
+  const { data } = useFetch<any[]>('/api/checkin/active');
+  const open = (data || []).filter((c) => !c.checked_in);
+  const done = (data || []).filter((c) => c.checked_in);
+  return (
+    <>
+      {open.map((c) => (
+        <Alert key={c.checkin_id} tone="info" title={`Check-in is open for ${c.occurrence.course_code} (${c.occurrence.start_time}-${c.occurrence.end_time})`}>
+          Open the eCampus app on your phone and tap <strong>Check in</strong>, then scan the code on the lecturer's screen.
+        </Alert>
+      ))}
+      {done.map((c) => (
+        <Alert key={c.checkin_id} tone="success" title={`You are checked in to ${c.occurrence.course_code}`} />
+      ))}
+    </>
+  );
+}
+
 export default function Dashboard() {
   const { user } = useAuth();
   const { data: d, loading, error } = useFetch<any>(user?.role === 'super_admin' ? null : '/api/dashboard');
@@ -80,6 +99,17 @@ export default function Dashboard() {
           )}
           {teaches && d.my_pending_approvals > 0 && (
             <Alert tone="warning" title={`${plural(d.my_pending_approvals, 'attendance register')} waiting for your approval`} action={<Link to="/attendance?tab=approvals" className="btn btn-sm btn-primary">Review</Link>} />
+          )}
+
+          {user.role === 'student' && <OpenCheckins />}
+          {d.missed_lectures > 0 && (
+            <Alert
+              tone="danger"
+              title={`${plural(d.missed_lectures, 'lecture')} in the last two weeks had no attendance taken`}
+              action={<Link to={isManager ? '/reports' : '/my-timetable'} className="btn btn-sm btn-primary">{isManager ? 'See which' : 'My timetable'}</Link>}
+            >
+              {isManager ? 'Follow up with the lecturers, or check whether those lectures were cancelled.' : 'If a lecture took place, ask the class rep to submit the register; otherwise reschedule it.'}
+            </Alert>
           )}
 
           {d.claims?.awaiting_me > 0 && (

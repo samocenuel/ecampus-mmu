@@ -3,8 +3,8 @@
 import { Router } from 'express';
 import { requireRole } from '../auth.js';
 import { insert, q, tx } from '../db.js';
-import { facultyIdsForDean, placeholders } from '../scope.js';
-import { claimsXlsx } from '../services/exporter.js';
+import { facultyIdsForDean, managedDepartmentIds, placeholders } from '../scope.js';
+import { claimsXlsx, payslipPdf } from '../services/exporter.js';
 import { notify } from '../services/notify.js';
 import {
   canAct, claimableLectures, claimScope, claimSelect, claimSummary, EDITABLE_STATUSES, isPartTimer, nextActors, pendingLectureCount,
@@ -43,7 +43,11 @@ function assertManageRates(user, facultyId) {
 }
 
 function cleanRate(body) {
-  const data = pick(body, ['faculty_id', 'kind', 'name', 'unit', 'amount', 'description', 'active']);
+  const data = pick(body, ['faculty_id', 'kind', 'name', 'unit', 'amount', 'description', 'active', 'code']);
+  if (data.code !== undefined) {
+    data.code = data.code === 'invigilation' || data.code === true ? 'invigilation' : null;
+    if (data.code) data.unit = 'hour';
+  }
   if (data.faculty_id !== undefined) data.faculty_id = toInt(data.faculty_id);
   if (data.kind !== undefined && !['teaching', 'task'].includes(data.kind)) throw badRequest('Rate kind must be teaching or task');
   if (data.unit !== undefined && !UNITS.includes(data.unit)) throw badRequest(`Unit must be one of: ${UNITS.join(', ')}`);
@@ -89,6 +93,7 @@ router.post('/rates', requireRole('admin', 'dean'), (req, res) => {
   if (data.kind === 'teaching' && teachingRate(data.faculty_id)) {
     throw badRequest('This faculty already has a teaching rate. Edit it instead.');
   }
+  if (data.code) q.run('UPDATE pay_rates SET code = NULL WHERE faculty_id = ? AND code = ?', data.faculty_id, data.code);
   const id = insert('pay_rates', { ...data, university_id: req.uid, updated_by: req.user.id });
   res.status(201).json(q.get('SELECT * FROM pay_rates WHERE id = ?', id));
 });
@@ -100,7 +105,11 @@ router.put('/rates/:id', requireRole('admin', 'dean'), (req, res) => {
   const data = cleanRate(req.body);
   delete data.faculty_id;
   delete data.kind;
-  if (rate.kind === 'teaching') data.unit = 'hour';
+  if (rate.kind === 'teaching') {
+    data.unit = 'hour';
+    delete data.code;
+  }
+  if (data.code) q.run('UPDATE pay_rates SET code = NULL WHERE faculty_id = ? AND code = ? AND id <> ?', rate.faculty_id, data.code, rate.id);
   const keys = Object.keys(data);
   if (keys.length) {
     q.run(
@@ -120,6 +129,63 @@ router.delete('/rates/:id', requireRole('admin', 'dean'), (req, res) => {
   // Claims keep the name and price they were made with.
   q.run('DELETE FROM pay_rates WHERE id = ?', rate.id);
   res.json({ ok: true });
+});
+
+// ----------------------------------------------------------------- Budgets
+
+/** The term a date falls in (claims are budgeted by the term their period starts in). */
+const termAt = (uid, date) =>
+  q.get('SELECT * FROM academic_terms WHERE university_id = ? AND (start_date IS NULL OR start_date <= ?) AND (end_date IS NULL OR end_date >= ?) ORDER BY start_date DESC LIMIT 1', uid, date, date);
+
+/** A department's part-time budget for a term and what claims have committed against it. */
+export function budgetFor(departmentId, termId) {
+  const b = q.get('SELECT * FROM pay_budgets WHERE department_id = ? AND term_id = ?', departmentId, termId);
+  const term = q.get('SELECT * FROM academic_terms WHERE id = ?', termId);
+  const sums = q.get(
+    `SELECT COALESCE(SUM(CASE WHEN status NOT IN ('draft','rejected') THEN total END), 0) AS committed,
+            COALESCE(SUM(CASE WHEN status = 'paid' THEN total END), 0) AS paid
+       FROM pay_claims WHERE department_id = ? AND period_start BETWEEN ? AND ?`,
+    departmentId,
+    term?.start_date || '0000-01-01',
+    term?.end_date || '9999-12-31',
+  );
+  return { amount: b ? b.amount : null, committed: round2(sums.committed), paid: round2(sums.paid), remaining: b ? round2(b.amount - sums.committed) : null };
+}
+
+router.get('/budgets', (req, res) => {
+  if (!['admin', 'dean', 'hod', 'hr'].includes(req.user.role)) throw forbidden();
+  const term = toInt(req.query.term_id) ? q.get('SELECT * FROM academic_terms WHERE id = ? AND university_id = ?', toInt(req.query.term_id), req.uid) : termAt(req.uid, zonedNow(q.get('SELECT timezone FROM universities WHERE id = ?', req.uid).timezone).date);
+  if (!term) return res.json({ term: null, departments: [] });
+  const depts = ['admin', 'hr'].includes(req.user.role) ? null : managedDepartmentIds(req.user);
+  const rows = q.all(
+    `SELECT d.id, d.name, d.faculty_id, f.name AS faculty_name FROM departments d JOIN faculties f ON f.id = d.faculty_id
+      WHERE d.university_id = ? ${depts ? `AND d.id IN (${placeholders(depts)})` : ''} ORDER BY f.name, d.name`,
+    req.uid,
+    ...(depts || []),
+  );
+  const canSet = (d) => req.user.role === 'admin' || (req.user.role === 'dean' && facultyIdsForDean(req.user).includes(d.faculty_id));
+  res.json({ term, departments: rows.map((d) => ({ ...d, ...budgetFor(d.id, term.id), can_set: canSet(d) })) });
+});
+
+router.put('/budgets', requireRole('admin', 'dean'), (req, res) => {
+  requireFields(req.body, ['department_id', 'term_id', 'amount']);
+  const dept = q.get('SELECT * FROM departments WHERE id = ? AND university_id = ?', toInt(req.body.department_id), req.uid);
+  if (!dept) throw notFound('Department');
+  if (req.user.role === 'dean' && !facultyIdsForDean(req.user).includes(dept.faculty_id)) throw forbidden('Only the Dean of this faculty can set its budgets');
+  const term = q.get('SELECT * FROM academic_terms WHERE id = ? AND university_id = ?', toInt(req.body.term_id), req.uid);
+  if (!term) throw badRequest('Unknown term');
+  const amount = Number(req.body.amount);
+  if (!(amount >= 0) || amount > 1e12) throw badRequest('Enter a valid budget amount');
+  q.run(
+    `INSERT INTO pay_budgets (university_id, department_id, term_id, amount, set_by, updated_at) VALUES (?, ?, ?, ?, ?, datetime('now'))
+     ON CONFLICT (department_id, term_id) DO UPDATE SET amount = excluded.amount, set_by = excluded.set_by, updated_at = excluded.updated_at`,
+    req.uid,
+    dept.id,
+    term.id,
+    amount,
+    req.user.id,
+  );
+  res.json({ ...dept, ...budgetFor(dept.id, term.id) });
 });
 
 // ------------------------------------------------------------------ Claims
@@ -236,6 +302,14 @@ router.get('/:id', (req, res) => {
   out.lines = lines;
   out.events = events;
   out.teaching_rate = teachingRate(claim.faculty_id) || null;
+  const term = termAt(req.uid, claim.period_start);
+  if (term && claim.department_id && ['admin', 'dean', 'hod', 'hr'].includes(req.user.role)) {
+    const b = budgetFor(claim.department_id, term.id);
+    const pending = ['draft', 'rejected'].includes(claim.status) ? claim.total : 0;
+    out.budget = { ...b, term_name: term.name, would_exceed: b.amount != null && b.committed + pending > b.amount };
+  }
+  const teaching = lines.filter((l) => l.kind === 'teaching');
+  out.verification = { lectures: teaching.length, confirmed: teaching.filter((l) => l.self_checkins > 0).length };
   if (out.can_edit) out.pending_lectures = pendingLectureCount(claim.lecturer_id, claim.period_start, claim.period_end);
   res.json(out);
 });
@@ -253,6 +327,19 @@ router.delete('/:id', (req, res) => {
   if (claim.lecturer_id !== req.user.id || claim.status !== 'draft') throw badRequest('Only your own draft claims can be deleted');
   q.run('DELETE FROM pay_claims WHERE id = ?', claim.id);
   res.json({ ok: true });
+});
+
+/** Payslip (once paid) or claim form PDF with every line and the approval trail. */
+router.get('/:id/payslip', async (req, res) => {
+  const claim = loadClaim(req);
+  if (claim.status === 'draft') throw badRequest('Submit the claim first');
+  const lines = q.all('SELECT * FROM pay_claim_lines WHERE claim_id = ? ORDER BY work_date, start_time, id', claim.id);
+  const events = q.all('SELECT e.*, u.name AS actor_name FROM pay_claim_events e LEFT JOIN users u ON u.id = e.actor_id WHERE e.claim_id = ? ORDER BY e.id', claim.id);
+  const university = q.get('SELECT * FROM universities WHERE id = ?', req.uid);
+  const buf = await payslipPdf(university, { ...claim, status_label: STATUS_LABELS[claim.status] }, lines, events);
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${claim.status === 'paid' ? 'payslip' : 'claim'}-${claim.id}-${slugify(claim.lecturer_name)}.pdf"`);
+  res.send(buf);
 });
 
 router.post('/:id/refresh', (req, res) => {
@@ -349,13 +436,15 @@ router.post('/:id/approve', (req, res) => {
   );
   event(claim.id, req.user.id, stage.next === 'paid' ? 'paid' : stage.next === 'hr_verified' ? 'verified' : 'approved', STAGE_NAMES[claim.status], [note, reference && `Payment ref. ${reference}`].filter(Boolean).join(' · '));
   const fresh = q.get(`${claimSelect} WHERE pc.id = ?`, claim.id);
+  const budgetTerm = termAt(req.uid, claim.period_start);
+  const budget = budgetTerm && claim.department_id ? budgetFor(claim.department_id, budgetTerm.id) : null;
   if (stage.next === 'paid') {
     notify(claim.lecturer_id, { title: 'Claim paid', body: `${claim.title}: ${claim.currency} ${claim.total.toLocaleString('en')} (ref. ${reference})`, type: 'claim', link: `/claims/${claim.id}` });
   } else {
     notify(nextActors(fresh, stage.next), { title: stage.next === 'hr_verified' ? 'Verified claim to pay' : 'Part-time claim to approve', body: `${claim.lecturer_name}: ${claim.title}`, type: 'claim', link: `/claims/${claim.id}` });
     notify(claim.lecturer_id, { title: `Claim ${stage.next === 'hr_verified' ? 'verified by HR' : `approved by the ${STAGE_NAMES[claim.status]}`}`, body: claim.title, type: 'claim', link: `/claims/${claim.id}` });
   }
-  res.json(describe(fresh, req.user));
+  res.json({ ...describe(fresh, req.user), budget_warning: budget?.amount != null && budget.remaining < 0 ? `The department is ${fresh.currency} ${Math.abs(budget.remaining).toLocaleString('en')} over its part-time budget for ${budgetTerm.name}` : null });
 });
 
 router.post('/:id/reject', (req, res) => {

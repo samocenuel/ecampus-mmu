@@ -20,6 +20,10 @@ import notificationRoutes from './routes/notifications.js';
 import reportRoutes from './routes/reports.js';
 import dashboardRoutes from './routes/dashboard.js';
 import claimRoutes from './routes/claims.js';
+import calendarRoutes from './routes/calendar.js';
+import checkinRoutes from './routes/checkin.js';
+import examRoutes from './routes/exams.js';
+import opsRoutes from './routes/ops.js';
 
 const UNIQUE_MESSAGES = {
   'users.email': 'A user with that email address already exists',
@@ -34,7 +38,7 @@ const UNIQUE_MESSAGES = {
 function errorHandler(err, _req, res, _next) {
   if (err instanceof HttpError) return res.status(err.status).json({ error: err.message, ...(err.extra || {}) });
   if (err?.type === 'entity.parse.failed') return res.status(400).json({ error: 'Invalid JSON body' });
-  if (err?.code === 'LIMIT_FILE_SIZE') return res.status(400).json({ error: 'File is too large (max 2 MB)' });
+  if (err?.code === 'LIMIT_FILE_SIZE') return res.status(400).json({ error: 'The file is too large' });
   const msg = String(err?.message || '');
   const unique = msg.match(/UNIQUE constraint failed: (.+)$/);
   if (unique) return res.status(409).json({ error: UNIQUE_MESSAGES[unique[1]] || 'That record already exists' });
@@ -86,6 +90,8 @@ export function createApp({ basePath = config.basePath } = {}) {
   app.use('/', publicPages);
   app.use('/api/auth', authRoutes);
   app.use('/api/platform', authenticate, platformRoutes);
+  // Calendar feeds are opened by calendar apps, so they use a secret link instead of a sign-in.
+  app.use('/api/calendar', calendarRoutes);
 
   const tenant = express.Router();
   tenant.use(authenticate, requireTenant);
@@ -100,6 +106,9 @@ export function createApp({ basePath = config.basePath } = {}) {
   tenant.use('/reports', reportRoutes);
   tenant.use('/dashboard', dashboardRoutes);
   tenant.use('/claims', claimRoutes);
+  tenant.use('/checkin', checkinRoutes);
+  tenant.use('/ops', opsRoutes);
+  tenant.use('/exams', examRoutes);
   app.use('/api', tenant);
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found' }));
 

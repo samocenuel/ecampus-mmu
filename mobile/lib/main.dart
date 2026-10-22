@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import 'core/app_state.dart';
 import 'screens/home_shell.dart';
 import 'screens/login_screen.dart';
+import 'screens/profile_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -50,7 +51,9 @@ class LmsApp extends StatelessWidget {
           ? const Scaffold(body: Center(child: CircularProgressIndicator()))
           : app.user == null
               ? const LoginScreen()
-              : const HomeShell(),
+              : app.mustChangePassword
+                  ? const ForcedPasswordScreen()
+                  : const HomeShell(),
     );
   }
 }

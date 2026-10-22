@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { BarChart3, Copy, Power, Upload } from 'lucide-react';
+import { BarChart3, Copy, Power, Smartphone, Upload } from 'lucide-react';
 import { api } from '../api';
 import { useAuth } from '../auth';
 import { useFeedback } from '../components/feedback';
@@ -189,6 +189,15 @@ export default function Users() {
     { name: 'password', label: 'Password', type: 'password', placeholder: 'Leave blank to generate a temporary password', span: 2 },
   ];
 
+  const resetPhone = async (u: any) => {
+    try {
+      await api(`/api/users/${u.id}/reset-device`, { method: 'POST' });
+      toast(`${u.name} can now check in from a new phone`);
+    } catch (err) {
+      fail(err);
+    }
+  };
+
   const toggleActive = async (u: any, reload: () => void) => {
     try {
       await api(`/api/users/${u.id}`, { method: 'PUT', body: { active: !u.active } });
@@ -249,6 +258,11 @@ export default function Users() {
             {u.role === 'student' && (
               <IconButton label="Attendance" onClick={() => setHistory(u)}>
                 <BarChart3 size={16} />
+              </IconButton>
+            )}
+            {u.role === 'student' && u.has_device && (CREATABLE[user!.role] || []).includes('student') && (
+              <IconButton label="Reset registered phone (student changed phones)" onClick={() => resetPhone(u)}>
+                <Smartphone size={16} />
               </IconButton>
             )}
             {u.id !== user!.id && (CREATABLE[user!.role] || []).includes(u.role) && (

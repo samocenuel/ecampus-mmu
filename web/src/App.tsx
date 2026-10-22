@@ -7,7 +7,12 @@ import { Layout } from './components/Layout';
 import { EmptyState, Spinner } from './components/ui';
 import Allocation from './pages/Allocation';
 import Attendance, { RegisterPage } from './pages/Attendance';
+import CheckIn from './pages/CheckIn';
 import Claims, { ClaimDetail } from './pages/Claims';
+import Exams from './pages/Exams';
+import Leave, { LeaveDetail } from './pages/Leave';
+import { ForcedPasswordChange } from './pages/Profile';
+import AcademicCalendar from './pages/setup/AcademicCalendar';
 import Dashboard from './pages/Dashboard';
 import Login from './pages/Login';
 import MyTimetable from './pages/MyTimetable';
@@ -35,7 +40,10 @@ function RequireAuth({ children }: { children: ReactNode }) {
       </div>
     );
   }
-  return user ? <>{children}</> : <Navigate to="/login" replace />;
+  if (!user) return <Navigate to="/login" replace />;
+  // Someone else knew the starting password, so the owner chooses their own before anything else.
+  if (user.must_change_password) return <ForcedPasswordChange />;
+  return <>{children}</>;
 }
 
 function Only({ roles, children }: { roles: Role[]; children: ReactNode }) {
@@ -73,6 +81,11 @@ export default function App() {
               <Route path="attendance/registers/:id" element={<Only roles={MEMBERS}><RegisterPage /></Only>} />
               <Route path="notifications" element={<Only roles={[...MEMBERS, 'hr']}><Notifications /></Only>} />
               <Route path="claims" element={<Only roles={[...STAFF, 'hr']}><Claims /></Only>} />
+              <Route path="checkin/:id" element={<Only roles={MEMBERS}><CheckIn /></Only>} />
+              <Route path="exams" element={<Only roles={MEMBERS}><Exams /></Only>} />
+              <Route path="leave" element={<Only roles={STAFF}><Leave /></Only>} />
+              <Route path="leave/:id" element={<Only roles={STAFF}><LeaveDetail /></Only>} />
+              <Route path="setup/calendar" element={<Only roles={['admin']}><AcademicCalendar /></Only>} />
               <Route path="claims/:id" element={<Only roles={[...STAFF, 'hr']}><ClaimDetail /></Only>} />
               <Route path="allocation" element={<Only roles={MANAGERS}><Allocation /></Only>} />
               <Route path="timetable" element={<Only roles={STAFF}><Timetable /></Only>} />

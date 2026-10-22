@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../core/app_state.dart';
 import '../widgets/common.dart';
+import 'checkin_screen.dart';
 import 'home_shell.dart';
 
 class AttendanceScreen extends StatelessWidget {
@@ -15,6 +16,7 @@ class AttendanceScreen extends StatelessWidget {
       if (app.isClassRep) ('Take attendance', const _SessionsForDate(role: 'rep')),
       if (app.teaches) ('My lectures', const _SessionsForDate(role: 'lecturer')),
       if (app.teaches || app.isManager) ('Approvals', const _RegisterList(status: 'submitted')),
+      if (app.teaches || app.isManager) ('Corrections', const _Corrections()),
       if (app.isManager || app.teaches || app.isClassRep) ('Registers', const _RegisterList()),
       if (app.isStudent) ('My attendance', const _MyAttendance()),
     ];
@@ -45,6 +47,20 @@ class _SessionsForDate extends StatefulWidget {
 class _SessionsForDateState extends State<_SessionsForDate> {
   DateTime _date = DateTime.now();
   int _version = 0;
+
+  Future<void> _openCheckin(int id) async {
+    await Navigator.of(context).push(MaterialPageRoute(builder: (_) => CheckinHostScreen(id: id)));
+    if (mounted) setState(() => _version++);
+  }
+
+  Future<void> _startCheckin(Map i) async {
+    try {
+      final r = await context.read<AppState>().api.post('/api/checkin/start', {'session_id': i['session']['id'], 'date': isoDate(_date)}) as Map<String, dynamic>;
+      if (mounted) await _openCheckin(r['id'] as int);
+    } catch (e) {
+      if (mounted) showError(context, e);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -87,9 +103,19 @@ class _SessionsForDateState extends State<_SessionsForDate> {
                   subtitlePrefix: widget.role == 'lecturer' ? i['class_name'] as String : null,
                   trailing: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.end, children: [
                     StatusChip(i['register'] != null ? i['register']['status'] as String : (i['not_started'] == true ? 'not_started' : 'not_taken')),
+                    if (i['checkin'] != null)
+                      TextButton.icon(
+                        onPressed: () => _openCheckin(i['checkin']['id'] as int),
+                        icon: const Icon(Icons.qr_code_2, size: 16),
+                        label: Text(i['checkin']['open'] == true ? 'Check-in open' : 'Check-in'),
+                      )
+                    else if (widget.role == 'lecturer' && i['register'] == null && i['not_started'] != true && isoDate(_date) == isoDate(DateTime.now()))
+                      TextButton.icon(onPressed: () => _startCheckin(i), icon: const Icon(Icons.qr_code_2, size: 16), label: const Text('Start check-in')),
                   ]),
                   onTap: () async {
-                    if (widget.role == 'rep') {
+                    if (i['checkin'] != null) {
+                      await _openCheckin(i['checkin']['id'] as int);
+                    } else if (widget.role == 'rep') {
                       final saved = await Navigator.of(context).push<bool>(MaterialPageRoute(builder: (_) => RegisterSheetPage(item: i as Map<String, dynamic>, date: isoDate(_date))));
                       if (saved == true) setState(() => _version++);
                     } else if (i['register'] != null) {
@@ -395,13 +421,125 @@ class _RegisterDetailPageState extends State<RegisterDetailPage> {
       );
 }
 
-class _MyAttendance extends StatelessWidget {
+/// Students who say they attended but could not check in; the lecturer accepts or rejects.
+class _Corrections extends StatefulWidget {
+  const _Corrections();
+
+  @override
+  State<_Corrections> createState() => _CorrectionsState();
+}
+
+class _CorrectionsState extends State<_Corrections> {
+  int _version = 0;
+
+  Future<void> _decide(Map c, String action) async {
+    final note = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(action == 'approve' ? 'Mark ${c['student_name']} present?' : 'Reject this correction?'),
+        content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('"${c['note']}"'),
+          const SizedBox(height: 10),
+          TextField(controller: note, decoration: InputDecoration(labelText: action == 'reject' ? 'Reason (required)' : 'Note (optional)')),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: Text(action == 'approve' ? 'Mark present' : 'Reject')),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    try {
+      await context.read<AppState>().api.post('/api/attendance/corrections/${c['id']}/review', {'action': action, 'note': note.text.trim()});
+      if (mounted) setState(() => _version++);
+    } catch (e) {
+      if (mounted) showError(context, e);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final api = context.read<AppState>().api;
+    return AsyncView<List>(
+      key: ValueKey(_version),
+      load: () async => await api.get('/api/attendance/corrections') as List,
+      builder: (context, list, reload) {
+        if (list.isEmpty) return ListView(children: const [SizedBox(height: 60), EmptyView(icon: Icons.inbox_outlined, title: 'No correction requests')]);
+        return ListView(padding: const EdgeInsets.all(12), children: [
+          for (final c in list.cast<Map<String, dynamic>>())
+            Card(
+              margin: const EdgeInsets.only(bottom: 8),
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Row(children: [
+                    Expanded(child: Text('${c['student_name']}', style: const TextStyle(fontWeight: FontWeight.w600))),
+                    if (c['status'] != 'submitted') StatusChip(c['status'] as String),
+                  ]),
+                  Text('${c['student_identifier'] ?? ''} · ${c['class_name']} · ${c['course_code']} ${niceDate(c['lecture_date'])} ${c['start_time']}'),
+                  const SizedBox(height: 4),
+                  Text('"${c['note']}"', style: const TextStyle(fontStyle: FontStyle.italic)),
+                  if (c['status'] == 'submitted')
+                    Row(mainAxisAlignment: MainAxisAlignment.end, children: [
+                      TextButton(onPressed: () => _decide(c, 'reject'), child: const Text('Reject')),
+                      const SizedBox(width: 8),
+                      FilledButton(onPressed: () => _decide(c, 'approve'), child: const Text('Mark present')),
+                    ]),
+                ]),
+              ),
+            ),
+        ]);
+      },
+    );
+  }
+}
+
+class _MyAttendance extends StatefulWidget {
   const _MyAttendance();
+
+  @override
+  State<_MyAttendance> createState() => _MyAttendanceState();
+}
+
+class _MyAttendanceState extends State<_MyAttendance> {
+  int _version = 0;
+
+  bool _recent(String date) => DateTime.now().difference(DateTime.parse('${date}T12:00:00')).inHours <= 72;
+
+  Future<void> _requestCorrection(Map r) async {
+    final note = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('${r['course_code']} on ${niceDate(r['lecture_date'])}'),
+        content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('You are marked absent. If you attended but could not check in (flat battery, no network), tell your lecturer. Requests are accepted for a short time after the lecture.'),
+          const SizedBox(height: 10),
+          TextField(controller: note, minLines: 2, maxLines: 4, decoration: const InputDecoration(labelText: 'What happened?', hintText: 'e.g. My phone battery died; I sat in the front row')),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Send request')),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    try {
+      await context.read<AppState>().api.post('/api/attendance/corrections', {'register_id': r['register_id'], 'note': note.text.trim()});
+      if (!mounted) return;
+      showMessage(context, 'Request sent to your lecturer');
+      setState(() => _version++);
+    } catch (e) {
+      if (mounted) showError(context, e);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final api = context.read<AppState>().api;
     return AsyncView<Map<String, dynamic>>(
+      key: ValueKey(_version),
       load: () async => await api.get('/api/attendance/my-history') as Map<String, dynamic>,
       builder: (context, h, reload) {
         final summary = h['summary'] as Map<String, dynamic>;
@@ -455,8 +593,14 @@ class _MyAttendance extends StatelessWidget {
                   contentPadding: EdgeInsets.zero,
                   leading: Icon(r['present'] == 1 ? Icons.check_circle : Icons.cancel, color: r['present'] == 1 ? Colors.green.shade600 : Colors.red.shade400),
                   title: Text('${r['course_code']} ${r['course_name']}', maxLines: 1, overflow: TextOverflow.ellipsis),
-                  subtitle: Text('${niceDate(r['lecture_date'])} · ${r['start_time']}'),
-                  trailing: r['status'] == 'approved' ? null : StatusChip(r['status'] as String),
+                  subtitle: Text('${niceDate(r['lecture_date'])} · ${r['start_time']}${r['present'] == 1 && r['method'] == 'qr' ? ' · phone check-in' : ''}'),
+                  trailing: r['correction_status'] != null
+                      ? Text(r['correction_status'] == 'submitted' ? 'Correction pending' : 'Correction ${r['correction_status']}', style: const TextStyle(fontSize: 12))
+                      : r['present'] != 1 && r['register_id'] != null && _recent(r['lecture_date'] as String)
+                          ? TextButton(onPressed: () => _requestCorrection(r), child: const Text('I was there'))
+                          : r['status'] == 'approved'
+                              ? null
+                              : StatusChip(r['status'] as String),
                 ),
             ]),
           ),
